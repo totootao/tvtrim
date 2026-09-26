@@ -1,0 +1,14 @@
+.git
+.github
+.cache
+.ffmpeg-cache
+bin
+Dockerfile
+Dockerfile.*
+.dockerignore
+*.md
+*.tar.gz
+*.mp4
+*.mkv
+*.ts
+*.avi

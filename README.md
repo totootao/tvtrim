@@ -54,6 +54,34 @@ go build -o tvtrim ./cmd/tvtrim
 go install github.com/totootao/tvtrim/cmd/tvtrim@latest
 ```
 
+### Docker
+
+镜像 `totootao/tvtrim` 由 GitHub Actions 自动构建并推送到 Docker Hub,
+支持 `linux/amd64` 与 `linux/arm64`,**镜像内已预置 ffmpeg-trim**,无需运行时下载:
+
+```sh
+docker pull totootao/tvtrim
+
+# 裁剪宿机当前目录下的剧集(注意用绝对路径挂载)
+docker run --rm -v "$PWD/某剧.S01":/media totootao/tvtrim -auto /media
+
+# 与宿机的 uid/gid 对齐,避免输出文件变成 root 所有
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/某剧.S01":/media \
+  totootao/tvtrim -head 90 -tail 60 /media
+
+# Web 界面:必须监听 0.0.0.0,否则容器外访问不到
+docker run --rm -p 8080:8080 -v "$PWD/某剧":/media \
+  totootao/tvtrim -web -auto -no-open -addr 0.0.0.0:8080 /media
+```
+
+容器默认工作目录 `/media`,入口就是 `tvtrim`,所以 `- /media` 之后的参数与命令行版一致。
+
+| 镜像标签 | 含义 |
+|---|---|
+| `totootao/tvtrim:latest` | main 分支最新构建 |
+| `totootao/tvtrim:main` | 同上(buildx 分支标签) |
+| `totootao/tvtrim:1.3` / `:1.3.0` | 对应 `v*` tag 发布的版本 |
+
 ## 用法
 
 ```sh
