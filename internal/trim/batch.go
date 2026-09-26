@@ -36,6 +36,9 @@ type BatchOptions struct {
 	// HeadTailOverride 为个别文件指定头尾时长,key 为文件路径
 	// (自动识别模式下每个文件的切点不同)。未列出的文件用 Trim.Head/Trim.Tail。
 	HeadTailOverride map[string]HeadTail
+	// OnResult 在每个文件处理完成后被调用,用于外部进度展示(Web 界面用)。
+	// 注意:该函数在 RunBatch 的结果收集协程中同步调用,实现应避免耗时操作。
+	OnResult func(Result)
 }
 
 // BatchResult 汇总一次批量处理的结果。
@@ -182,7 +185,11 @@ func RunBatch(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opt
 		} else {
 			res.Done++
 		}
+		cb := opts.OnResult
 		mu.Unlock()
+		if cb != nil {
+			cb(r)
+		}
 	}
 
 	// 汇总输出体积。

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tvtrim - 剧集确认</title>
+<style>
+  :root{
+    --bg:#12141a;--panel:#1a1d26;--line:#272b36;--text:#e6e8ee;--dim:#98a0b3;
+    --accent:#4f8cff;--ok:#3ecf8e;--warn:#ffb454;--err:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  header{position:sticky;top:0;z-index:10;background:var(--panel);border-bottom:1px solid var(--line);
+    padding:14px 20px;display:flex;flex-wrap:wrap;gap:16px;align-items:center}
+  h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.5px}
+  h1 small{color:var(--dim);font-weight:400;margin-left:8px;font-size:12px}
+  .meta{color:var(--dim);font-size:12px}
+  .meta code{color:var(--text);background:#00000040;padding:1px 5px;border-radius:3px}
+  .bar{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  button{background:var(--accent);border:0;color:#fff;padding:7px 14px;border-radius:6px;
+    cursor:pointer;font-size:13px;font-weight:500;transition:opacity .15s}
+  button:hover{opacity:.85}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
+  button.danger{background:var(--err)}
+  main{padding:18px 20px 120px}
+  .show{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;overflow:hidden}
+  .show>summary{cursor:pointer;padding:12px 16px;display:flex;align-items:center;gap:12px;font-weight:600}
+  .show>summary::-webkit-details-marker{display:none}
+  .caret{color:var(--dim);transition:transform .15s;display:inline-block}
+  details[open] .caret{transform:rotate(90deg)}
+  .show .badge{font-size:11px;color:var(--dim);font-weight:400;border:1px solid var(--line);
+    padding:1px 7px;border-radius:99px}
+  .show .acts{margin-left:auto;display:flex;gap:8px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:8px 12px;border-top:1px solid var(--line);text-align:left;vertical-align:middle}
+  th{color:var(--dim);font-weight:500;font-size:12px;background:#00000020}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr.off td{opacity:.4}
+  input[type=number]{width:76px;background:#0d0f14;border:1px solid var(--line);color:var(--text);
+    border-radius:5px;padding:4px 6px;font:inherit}
+  input[type=number]:focus{outline:1px solid var(--accent);border-color:var(--accent)}
+  input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+  .note{color:var(--dim);font-size:11.5px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .st-done{color:var(--ok)}.st-failed{color:var(--err)}.st-running{color:var(--warn)}
+  .st-pending{color:var(--dim)}
+  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .d-done{background:var(--ok)}.d-failed{background:var(--err)}.d-running{background:var(--warn)}
+  .d-pending{background:var(--dim)}
+  footer{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top:1px solid var(--line);
+    padding:12px 20px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;z-index:10}
+  .progress{flex:1;min-width:200px;height:6px;background:#0d0f14;border-radius:99px;overflow:hidden}
+  .progress i{display:block;height:100%;background:var(--accent);width:0;transition:width .3s}
+  .summary{font-size:12.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .empty{padding:40px;text-align:center;color:var(--dim)}
+  .err-box{margin:12px 20px;padding:10px 14px;border-radius:8px;background:#ff6b6b1a;
+    border:1px solid #ff6b6b55;color:#ffc9c9;font-size:12.5px;white-space:pre-wrap}
+  .tip{color:var(--dim);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>tvtrim <small id="ver"></small></h1>
+  <div class="meta">
+    模式 <strong id="mode"></strong> · ffmpeg <code id="ffmpeg"></code> ·
+    剧 <strong id="s-shows">0</strong> · 集 <strong id="s-items">0</strong> ·
+    可裁剪 <strong id="s-ready">0</strong>
+  </div>
+  <div class="bar">
+    <button class="ghost" onclick="selectAll(true)">全选</button>
+    <button class="ghost" onclick="selectAll(false)">取消全选</button>
+  </div>
+</header>
+<main id="main"><div class="empty">加载中…</div></main>
+<footer>
+  <button id="btn-run" onclick="runChecked()">执行选中 (<span id="n-checked">0</span>)</button>
+  <button class="ghost" id="btn-cancel" onclick="cancelJob()" disabled>取消</button>
+  <div class="progress"><i id="prog"></i></div>
+  <div class="summary" id="summary">就绪</div>
+  <button class="ghost" onclick="shutdown()">退出</button>
+</footer>
+
+<script>
+let state = {shows:[], job:null}, timer = null;
+
+function fmtSize(b){
+  if(!b) return "-";
+  const u=["B","KB","MB","GB","TB"]; let i=0, v=b;
+  while(v>=1024 && i<u.length-1){v/=1024;i++;}
+  return v.toFixed(2)+" "+u[i];
+}
+function fmtDur(s){
+  if(!s) return "-";
+  const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=Math.floor(s%60);
+  return (h?h+"h":"")+(h||m?m+"m":"")+x+"s";
+}
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if(!r.ok){ throw new Error((await r.text()).trim() || r.statusText); }
+  return await r.json();
+}
+
+function render(){
+  const st = state;
+  document.getElementById("ver").textContent = st.version || "";
+  document.getElementById("mode").textContent = st.mode === "auto" ? "自动识别(-auto)" : "手动指定";
+  document.getElementById("ffmpeg").textContent = st.ffmpeg || "";
+  const sum = st.summary || {};
+  document.getElementById("s-shows").textContent = sum.shows || 0;
+  document.getElementById("s-items").textContent = sum.items || 0;
+  document.getElementById("s-ready").textContent = sum.ready || 0;
+
+  const job = st.job || {};
+  const statusOf = {};
+  (job.items||[]).forEach(it=>{ statusOf[it.path] = it; });
+
+  const main = document.getElementById("main");
+  if(!st.shows.length){ main.innerHTML = '<div class="empty">没有可处理的剧集文件</div>'; updateFooter(); return; }
+
+  main.innerHTML = st.shows.map(sh=>`
+    <details class="show" open>
+      <summary>
+        <span class="caret">▶</span>
+        <span>${esc(sh.name)}</span>
+        <span class="badge">${sh.items.length} 集</span>
+        <span class="badge">可裁剪 ${sh.ready}</span>
+        <span class="badge">${fmtSize(sh.total_in)}</span>
+        <span class="acts">
+          <button class="ghost" onclick="pick('${esc(sh.id)}',true);return false;">选本剧</button>
+          <button onclick="runShow('${esc(sh.id)}');return false;">确认执行本剧</button>
+        </span>
+      </summary>
+      <table>
+        <thead><tr>
+          <th style="width:34px"></th>
+          <th>集</th>
+          <th>文件</th>
+          <th class="num">时长</th>
+          <th class="num">大小</th>
+          <th class="num">片头 -head</th>
+          <th class="num">片尾 -tail</th>
+          <th class="num">裁剪后</th>
+          <th>状态</th>
+        </tr></thead>
+        <tbody>
+        ${sh.items.map(it=>{
+          const s = statusOf[it.path] || {};
+          const out = Math.max(0, (it.duration||0) - (+val(it.path,'head')) - (+val(it.path,'tail')));
+          return `<tr class="${it.ready?'':'off'}">
+            <td><input type="checkbox" data-show="${esc(sh.id)}" data-path="${esc(it.path)}"
+                 ${it.ready?'checked':'disabled'} ${s.status==='done'?'disabled':''}></td>
+            <td>${it.episode? 'EP'+String(it.episode).padStart(2,'0') : '-'}</td>
+            <td title="${esc(it.path)}">${esc(it.name)}</td>
+            <td class="num">${fmtDur(it.duration)}</td>
+            <td class="num">${fmtSize(it.size)}</td>
+            <td class="num"><input type="number" step="0.1" min="0" id="h:${esc(it.path)}" value="${fmtNum(it.head)}"
+                 ${it.ready?'':'disabled'} oninput="tick(this)"></td>
+            <td class="num"><input type="number" step="0.1" min="0" id="t:${esc(it.path)}" value="${fmtNum(it.tail)}"
+                 ${it.ready?'':'disabled'} oninput="tick(this)"></td>
+            <td class="num" id="o:${esc(it.path)}">${fmtDur(out)}</td>
+            <td class="st-${s.status||'pending'}">
+              <span class="dot d-${s.status||'pending'}"></span>${statusText(s, it)}
+            </td>
+          </tr>`;
+        }).join("")}
+        </tbody>
+      </table>
+    </details>`).join("");
+
+  if(job.error){ main.insertAdjacentHTML("afterbegin", `<div class="err-box">${esc(job.error)}</div>`); }
+  updateFooter();
+}
+
+function statusText(s, it){
+  if(s.status==="done") return "完成";
+  if(s.status==="failed") return "失败: " + esc((s.msg||"").split("\n").pop());
+  if(s.status==="running") return "处理中";
+  return it.ready ? esc(trimNote(it.note)) : esc(trimNote(it.note||"未就绪"));
+}
+function trimNote(s){ return String(s||"").replace(/\n/g," ").slice(0,40); }
+function fmtNum(v){ return v==null?0:(Math.round(v*10)/10); }
+
+function val(path, kind){
+  const el = document.getElementById((kind==='head'?'h:':'t:')+path);
+  if(el) return parseFloat(el.value)||0;
+  const it = findItem(path); return kind==='head' ? (it?it.head:0) : (it?it.tail:0);
+}
+function findItem(path){
+  for(const sh of state.shows) for(const it of sh.items) if(it.path===path) return it;
+  return null;
+}
+function tick(input){
+  const path = input.id.slice(2);
+  const it = findItem(path); if(!it) return;
+  const h = val(path,'head'), t = val(path,'tail');
+  const el = document.getElementById("o:"+path);
+  if(el) el.textContent = fmtDur(Math.max(0,(it.duration||0)-h-t));
+}
+function pick(id, on){
+  document.querySelectorAll(`input[data-show="${cssEsc(id)}"]`).forEach(cb=>{
+    if(!cb.disabled) { cb.checked = on; }
+  });
+  updateFooter();
+}
+function cssEsc(s){ return String(s).replace(/["\\]/g,'\\$&'); }
+function selectAll(on){ state.shows.forEach(sh=>pick(sh.id,on)); }
+function checkedItems(){
+  const out = [];
+  document.querySelectorAll('input[type=checkbox][data-path]').forEach(cb=>{
+    if(!cb.checked || cb.disabled) return;
+    const p = cb.getAttribute('data-path');
+    out.push({path:p, head:val(p,'head'), tail:val(p,'tail')});
+  });
+  return out;
+}
+function itemsOfShow(id){
+  const sh = state.shows.find(s=>s.id===id); if(!sh) return [];
+  return sh.items.filter(it=>it.ready).map(it=>({path:it.path, head:val(it.path,'head'), tail:val(it.path,'tail')}));
+}
+
+function updateFooter(){
+  const n = checkedItems().length;
+  const el = document.getElementById("n-checked"); if(el) el.textContent = n;
+  const job = state.job || {};
+  const running = !!job.running;
+  document.getElementById("btn-run").disabled = running || n===0;
+  document.getElementById("btn-cancel").disabled = !running;
+  const total = job.total||0, done=(job.done||0)+(job.failed||0);
+  const pct = total? Math.round(done/total*100):0;
+  document.getElementById("prog").style.width = pct+"%";
+  let msg = "就绪";
+  if(running) msg = `执行中 ${done}/${total} (${job.elapsed?(job.elapsed).toFixed(1):"0.0"}s)`;
+  else if(job.finished){
+    msg = `完成: ${job.done} 成功` + (job.failed?`, ${job.failed} 失败`:"") +
+          (job.canceled?" · 已取消":"") + ` · 耗时 ${(job.elapsed||0).toFixed(2)}s`;
+    if(job.bytes_out) msg += ` · ${fmtSize(job.bytes_in)} → ${fmtSize(job.bytes_out)}`;
+  } else if(job.canceled) msg = "已取消";
+  document.getElementById("summary").textContent = msg;
+}
+
+async function refresh(){
+  try{ state = await api("/api/state"); render(); }
+  catch(e){ document.getElementById("main").innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`; }
+}
+
+async function runItems(items, label){
+  if(!items.length){ alert("没有选中可执行的剧集"); return; }
+  if(!confirm(`确认${label} ${items.length} 个文件?(零重编码 stream copy,会生成新文件)`)) return;
+  const btn = document.getElementById("btn-run"); btn.disabled = true;
+  try{
+    await api("/api/run", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({items})});
+    startPoll();
+  }catch(e){ alert("启动失败: "+e.message); render(); }
+}
+function runChecked(){ runItems(checkedItems(), "执行"); }
+function runShow(id){
+  const sh = state.shows.find(s=>s.id===id);
+  runItems(itemsOfShow(id), "执行「"+(sh?sh.name:id)+"」的");
+}
+
+function startPoll(){
+  if(timer) return;
+  timer = setInterval(async()=>{
+    try{
+      const job = await api("/api/progress");
+      state.job = job; render();
+      if(job && job.finished){ clearInterval(timer); timer=null; await refresh(); }
+    }catch(e){ /* 忽略瞬时错误 */ }
+  }, 700);
+}
+
+async function cancelJob(){
+  try{ await api("/api/cancel",{method:"POST"}); }catch(e){}
+}
+async function shutdown(){
+  if(!confirm("退出服务?进程将结束。")) return;
+  try{ await api("/api/shutdown",{method:"POST"}); }catch(e){}
+  document.body.innerHTML = '<div class="empty">服务已退出,可以关闭此页面。</div>';
+}
+
+refresh();
+</script>
+</body>
+</html>

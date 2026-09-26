@@ -136,9 +136,19 @@ func Collect(inputs []string, opts Options) ([]Item, error) {
 		}
 	}
 
-	// 按 季/集 排序,没有编号的按文件名排。
+	// 排序规则:有编号的剧集按 季→集 升序排在最前;完全解析不出编号的文件统一排在最后,
+	// 再按路径字典序保证稳定。这样 Web 界面与 CLI 输出的顺序一致,便于人工核对。
+	numbered := func(it Item) int {
+		if it.Season == 0 && it.Episode == 0 {
+			return 1
+		}
+		return 0
+	}
 	sort.SliceStable(items, func(i, j int) bool {
 		a, b := items[i], items[j]
+		if na, nb := numbered(a), numbered(b); na != nb {
+			return na < nb
+		}
 		if a.Season != b.Season {
 			return a.Season < b.Season
 		}

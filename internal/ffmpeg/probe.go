@@ -108,9 +108,15 @@ func (r *Runner) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 		return nil, fmt.Errorf("探测 %s 超时: %w", path, cctx.Err())
 	}
 
-	// ffmpeg 找不到时给出可读的提示。
-	if runErr != nil && errors.Is(runErr, exec.ErrNotFound) {
-		return nil, fmt.Errorf("找不到 ffmpeg 可执行文件: %s", r.Path)
+	// ffmpeg 起不来:常见原因是路径写错、没有可执行权限或从未下载成功。
+	// 用"没有任何输出"来判断比只认 exec.ErrNotFound 更稳(绝对路径场景返回的是 PathError)。
+	if runErr != nil {
+		if errors.Is(runErr, exec.ErrNotFound) {
+			return nil, fmt.Errorf("找不到 ffmpeg 可执行文件: %s", r.Path)
+		}
+		if strings.TrimSpace(out) == "" {
+			return nil, fmt.Errorf("无法执行 ffmpeg(%s): %w —— 请确认文件存在且有可执行权限", r.Path, runErr)
+		}
 	}
 
 	if reInvalidData.MatchString(out) || strings.Contains(out, "Error opening input") {

@@ -14,11 +14,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
-	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -26,10 +25,11 @@ import (
 	"github.com/totootao/tvtrim/internal/ffmpeg"
 	"github.com/totootao/tvtrim/internal/scan"
 	"github.com/totootao/tvtrim/internal/trim"
+	"github.com/totootao/tvtrim/internal/web"
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.2.0"
+var version = "1.3.0"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 
@@ -38,6 +38,9 @@ const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编
 
 选项:
   -auto            自动识别片头/片尾(基于静音检测,多集自动纠错)
+  -web             启动 Web 界面:扫描后人工按剧确认再执行
+  -addr <地址>     Web 监听地址,默认 127.0.0.1:0(端口 0 自动分配)
+  -no-open         -web 时不自动打开浏览器
   -head <时长>     要砍掉的片头时长,如 90、1m30s、0:90
   -tail <时长>     要砍掉的片尾时长,如 60、1m、0:45
   -keep <时长>     结尾额外保留的安全余量(会让输出更短,默认 0)
@@ -67,6 +70,12 @@ const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编
 
   # 自动识别每集的片头曲/片尾曲并裁剪(推荐先 dry-run 看识别结果)
   tvtrim -auto ./某剧.S01/ -dry-run
+
+  # 打开 Web 界面:自动识别后在页面上逐剧确认,点"确认执行本剧"才真正裁剪
+  tvtrim -web -auto ./某剧全集/ -r
+
+  # Web 界面 + 手动时长(页面上仍可逐集调整)
+  tvtrim -web -head 90 -tail 60 ./某剧.S01/
 
   # 递归处理整个剧,先看一眼会做什么
   tvtrim -r -head 1m30s -tail 45s ./某剧/ -dry-run
@@ -105,6 +114,9 @@ type cliOptions struct {
 	noDownload bool
 	verbose    bool
 	showVer    bool
+	web        bool
+	addr       string
+	noOpen     bool
 }
 
 func run(argv []string) error {
@@ -115,6 +127,8 @@ func run(argv []string) error {
 	fs.Usage = func() { fmt.Fprintf(os.Stderr, usage, ffmpeg.DefaultProxy) }
 
 	fs.BoolVar(&o.auto, "auto", false, "自动识别片头/片尾(静音检测+多集纠错)")
+	fs.BoolVar(&o.web, "web", false, "启动 Web 界面:扫描后人工确认每部剧再执行")
+	fs.StringVar(&o.addr, "addr", "127.0.0.1:0", "Web 监听地址(端口 0 自动分配)")
 	fs.StringVar(&o.head, "head", "", "要砍掉的片头时长(如 90 / 1m30s)")
 	fs.StringVar(&o.tail, "tail", "", "要砍掉的片尾时长(如 60 / 1m)")
 	fs.StringVar(&o.keep, "keep", "", "结尾额外保留的安全余量")
@@ -129,6 +143,7 @@ func run(argv []string) error {
 	fs.StringVar(&o.ffmpegPath, "ffmpeg", "", "指定 ffmpeg 可执行文件")
 	fs.BoolVar(&o.noDownload, "no-download", false, "禁止自动下载 ffmpeg-trim")
 	fs.BoolVar(&o.verbose, "v", false, "输出详细信息")
+	fs.BoolVar(&o.noOpen, "no-open", false, "-web 时不尝试自动打开浏览器")
 	fs.BoolVar(&o.showVer, "version", false, "显示版本")
 
 	if err := fs.Parse(argv); err != nil {
@@ -163,12 +178,19 @@ func run(argv []string) error {
 	if err != nil {
 		return fmt.Errorf("-min 参数无效: %w", err)
 	}
-	if o.auto {
-		if head != 0 || tail != 0 {
-			return fmt.Errorf("-auto 与 -head/-tail 不能同时使用(自动识别模式下切点由检测决定)")
-		}
-	} else if head == 0 && tail == 0 {
-		return fmt.Errorf("请至少指定 -head 或 -tail 中的一个,或使用 -auto 自动识别")
+	// -web 可以与 -auto(页面展示识别结果)或 -head/-tail(页面可微调)组合,
+	// 但二者不能同时给;单独 -web 也无意义。
+	if o.web && o.auto && (head != 0 || tail != 0) {
+		return fmt.Errorf("-web 模式下请二选一:-auto 自动识别,或用 -head/-tail 手动指定")
+	}
+	if o.auto && (head != 0 || tail != 0) && !o.web {
+		return fmt.Errorf("-auto 与 -head/-tail 不能同时使用(自动识别模式下切点由检测决定)")
+	}
+	if head == 0 && tail == 0 && !o.auto && !o.web {
+		return fmt.Errorf("请至少指定 -head 或 -tail 中的一个,或使用 -auto / -web")
+	}
+	if o.web && head == 0 && tail == 0 && !o.auto {
+		return fmt.Errorf("-web 需要配合 -auto 或 -head/-tail:页面上至少要有一个默认切点")
 	}
 	if head < 0 || tail < 0 || keep < 0 {
 		return fmt.Errorf("时长不能为负数")
@@ -249,14 +271,21 @@ func run(argv []string) error {
 	}
 	fmt.Println()
 
-	// dry-run 走单独路径:探测 + 展示计划,不执行。
-	if o.dryRun && !o.auto {
-		return runDryRun(ctx, runner, items, trimOpts)
+	// Web 界面优先于 dry-run/自动识别分支:先出给人看,再等人工确认。
+	if o.web {
+		return runWeb(ctx, runner, items, o, trimOpts, head, tail)
 	}
 
-	// 自动识别模式:先检测每集切点,再进入常规批量流程。
+	// 自动识别优先于普通 dry-run:runAuto 内部自己处理 dry-run,
+	// 既要打印识别结果表,也要打印裁剪计划(否则 -auto -dry-run 会因为
+	// 还没算切点而把所有文件标成"未指定头尾时长")。
 	if o.auto {
 		return runAuto(ctx, runner, items, o, trimOpts)
+	}
+
+	// dry-run 走单独路径:探测 + 展示计划,不执行。
+	if o.dryRun {
+		return runDryRun(ctx, runner, items, trimOpts)
 	}
 
 	batch := trim.RunBatch(ctx, runner, items, trim.BatchOptions{
@@ -278,123 +307,44 @@ func run(argv []string) error {
 
 // runAuto 执行自动识别模式:
 //
-//	阶段一 并发探测 + 静音检测(音频全片解码,是 auto 模式的主要耗时)
-//	阶段二 逐集识别切点
-//	阶段三 多集众数纠错(同一部剧每集 OP/ED 时长一致)
-//	阶段四 展示识别结果
-//	阶段五 按每集切点进入常规批量裁剪
+//	阶段一 并发探测 + 静音检测 + 多集众数纠错(detectAll)
+//	阶段二 展示识别结果
+//	阶段三 按每集切点进入常规批量裁剪
 func runAuto(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, o cliOptions, trimOpts trim.Options) error {
-	workers := o.workers
-	if workers <= 0 {
-		workers = runtime.NumCPU()
-	}
-	if workers > len(items) && len(items) > 0 {
-		workers = len(items)
-	}
-	if workers < 1 {
-		workers = 1
-	}
+	results := detectAll(ctx, runner, items, o.workers, DetectSilence)
 
-	type detectOut struct {
-		item  scan.Item
-		probe *ffmpeg.ProbeResult
-		res   auto.Result
-		err   error // 探测/静音检测/识别任一环节的失败
-	}
-	outCh := make(chan detectOut, len(items))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, workers)
-
-	for _, it := range items {
-		wg.Add(1)
-		go func(it scan.Item) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			probe, err := runner.Probe(ctx, it.Path)
-			if err != nil {
-				outCh <- detectOut{item: it, err: err}
-				return
-			}
-			total := probe.Duration.Seconds()
-			sils, err := runner.DetectSilences(ctx, it.Path, auto.NoiseDB, auto.MinSilence, total)
-			if err != nil {
-				outCh <- detectOut{item: it, probe: probe, err: err}
-				return
-			}
-			res, err := auto.Detect(total, sils)
-			outCh <- detectOut{item: it, probe: probe, res: res, err: err}
-		}(it)
-	}
-	go func() { wg.Wait(); close(outCh) }()
-
-	var ordered []detectOut
-	for d := range outCh {
-		ordered = append(ordered, d)
-	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].item.Path < ordered[j].item.Path })
-
-	// 阶段二+三:识别成功的做多集众数纠错,并记录纠错前的一致率。
-	var oks []auto.Result // 按出现顺序收集的识别成功结果
-	var okIdx []int       // 各成功结果在 ordered 中的下标
-	for i, d := range ordered {
-		if d.err == nil && d.res.OK {
-			oks = append(oks, d.res)
-			okIdx = append(okIdx, i)
-		}
-	}
-	corrected := auto.Correct(oks) // Correct 不修改入参,返回纠错后的副本
-	for ci, oi := range okIdx {
-		r := corrected[ci]
-		if len(oks) > 1 {
-			agree, total := auto.Agreement(oks, ci) // 一致率按纠错前的原始结果计算
-			r.Note = fmt.Sprintf("[一致 %d/%d] ", agree, total) + r.Note
-		}
-		ordered[oi].res = r
-	}
-
-	// 阶段四:展示识别结果。
-	fmt.Printf("自动识别结果(静音阈值 %gdB, 切点静音 ≥%.1fs):\n\n", auto.NoiseDB, auto.MinSilence)
-	fmt.Printf("  %-44s %9s %9s  %s\n", "文件", "-head", "-tail", "说明")
-	fmt.Println("  " + strings.Repeat("-", 100))
-
-	override := make(map[string]trim.HeadTail, len(ordered))
-	var runItems []scan.Item
-	var failN int
-	for _, d := range ordered {
-		name := shortName(d.item.Path, 42)
-		switch {
-		case d.err != nil:
-			failN++
-			fmt.Printf("  %-44s %10s %10s  ✗ %v\n", name, "-", "-", d.err)
-		case !d.res.OK:
-			failN++
-			fmt.Printf("  %-44s %10s %10s  ✗ %s\n", name, "-", "-", d.res.Note)
-		default:
-			note := d.res.Note
-			if note == "" {
-				note = "OK"
-			}
-			fmt.Printf("  %-44s %9.1fs %9.1fs  %s\n", name, d.res.Head, d.res.Tail, note)
-			override[d.item.Path] = trim.HeadTail{
-				Head: time.Duration(d.res.Head * float64(time.Second)),
-				Tail: time.Duration(d.res.Tail * float64(time.Second)),
-			}
-			runItems = append(runItems, d.item)
-		}
-	}
-	fmt.Println("  " + strings.Repeat("-", 100))
-
-	// 识别全失败:没有可执行对象。
+	// 阶段二:展示识别结果。
+	runItems := runnableItems(results)
+	override := headTailOverride(results)
 	if len(runItems) == 0 {
 		return fmt.Errorf("自动识别全部失败,请改用 -head/-tail 手动指定")
 	}
+
+	fmt.Printf("自动识别结果(静音阈值 %gdB, 切点静音 ≥%.1fs):\n\n", auto.NoiseDB, auto.MinSilence)
+	fmt.Printf("  %-44s %9s %9s  %s\n", "文件", "-head", "-tail", "说明")
+	fmt.Println("  " + strings.Repeat("-", 100))
+	failN := failCount(results)
+	for _, d := range results {
+		name := shortName(d.Item.Path, 42)
+		switch {
+		case d.Err != nil:
+			fmt.Printf("  %-44s %10s %10s  ✗ %v\n", name, "-", "-", d.Err)
+		case !d.Res.OK:
+			fmt.Printf("  %-44s %10s %10s  ✗ %s\n", name, "-", "-", d.Res.Note)
+		default:
+			note := d.Res.Note
+			if note == "" {
+				note = "OK"
+			}
+			fmt.Printf("  %-44s %9.1fs %9.1fs  %s\n", name, d.Res.Head, d.Res.Tail, note)
+		}
+	}
+	fmt.Println("  " + strings.Repeat("-", 100))
 	if failN > 0 {
 		fmt.Printf("\n提示: %d 个文件识别失败,已跳过;其余 %d 个将按识别结果裁剪。\n", failN, len(runItems))
 	}
 
-	// 阶段五:按每集切点进入常规批量流程。
+	// 阶段三:按每集切点进入常规批量流程。
 	batch := trim.RunBatch(ctx, runner, runItems, trim.BatchOptions{
 		Trim:             trimOpts,
 		Workers:          o.workers,
@@ -421,6 +371,75 @@ func runAuto(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, o cl
 		return fmt.Errorf("%d 个文件处理失败", batch.Failed)
 	}
 	return nil
+}
+
+// runWeb 启动本地 Web 界面:
+// 扫描/识别完成后把结果推给页面,由人工按剧勾选确认后再真正执行裁剪。
+// 阻塞直到用户 Ctrl+C 或在页面上点击退出。
+func runWeb(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
+	o cliOptions, trimOpts trim.Options, head, tail time.Duration) error {
+
+	mode, detectMode := web.ModeManual, DetectProbeOnly
+	if o.auto {
+		mode, detectMode = web.ModeAuto, DetectSilence
+	}
+
+	fmt.Printf("正在%s(%d 个文件)…\n", map[bool]string{true: "自动识别切点", false: "探测媒体信息"}[o.auto], len(items))
+	results := detectAll(ctx, runner, items, o.workers, detectMode)
+
+	probes := make(map[string]*ffmpeg.ProbeResult, len(results))
+	detects := make(map[string]auto.Result, len(results))
+	for _, d := range results {
+		if d.Probe != nil {
+			probes[d.Item.Path] = d.Probe
+		}
+		if detectMode == DetectSilence && d.OK() {
+			detects[d.Item.Path] = d.Res
+		}
+	}
+	if detectMode == DetectSilence {
+		ok := len(detects)
+		fail := len(results) - ok
+		fmt.Printf("识别完成: %d 成功", ok)
+		if fail > 0 {
+			fmt.Printf(", %d 失败(页面上不可勾选)", fail)
+		}
+		fmt.Println()
+	}
+
+	shows := web.BuildShows(items, probes, detects, head.Seconds(), tail.Seconds())
+	srv := web.New(runner, shows, trimOpts, o.workers, version, mode)
+
+	ln, err := srv.Listen(o.addr)
+	if err != nil {
+		return fmt.Errorf("启动 Web 服务失败: %w", err)
+	}
+	url := fmt.Sprintf("http://%s/", ln.Addr().String())
+	fmt.Printf("  Web 界面: %s\n", url)
+	fmt.Printf("  输出方式: %s\n", describeOutput(o))
+	fmt.Println("\n在浏览器里勾选要处理的剧集,确认后执行。Ctrl+C 或点页面上的\"退出\"结束。")
+
+	if !o.noOpen {
+		go tryOpenBrowser(url)
+	}
+	return srv.Serve(ctx, ln)
+}
+
+// tryOpenBrowser 尽力打开系统浏览器,失败无所谓(用户可手动访问)。
+func tryOpenBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		return // 静默失败
+	}
+	_ = cmd.Process.Release()
 }
 
 // printPlans 打印裁剪计划表格,返回 (将执行, 跳过) 数量。
