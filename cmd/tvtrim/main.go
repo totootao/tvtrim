@@ -15,17 +15,21 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/totootao/tvtrim/internal/auto"
 	"github.com/totootao/tvtrim/internal/ffmpeg"
 	"github.com/totootao/tvtrim/internal/scan"
 	"github.com/totootao/tvtrim/internal/trim"
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.1.0"
+var version = "1.2.0"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 
@@ -33,6 +37,7 @@ const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编
   tvtrim [选项] <文件或目录> [更多文件或目录...]
 
 选项:
+  -auto            自动识别片头/片尾(基于静音检测,多集自动纠错)
   -head <时长>     要砍掉的片头时长,如 90、1m30s、0:90
   -tail <时长>     要砍掉的片尾时长,如 60、1m、0:45
   -keep <时长>     结尾额外保留的安全余量(会让输出更短,默认 0)
@@ -60,6 +65,9 @@ const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编
   # 砍掉 90 秒片头和 60 秒片尾,结果存为 xxx-trim.mp4
   tvtrim -head 90 -tail 60 ./进击的巨人.S01/
 
+  # 自动识别每集的片头曲/片尾曲并裁剪(推荐先 dry-run 看识别结果)
+  tvtrim -auto ./某剧.S01/ -dry-run
+
   # 递归处理整个剧,先看一眼会做什么
   tvtrim -r -head 1m30s -tail 45s ./某剧/ -dry-run
 
@@ -81,6 +89,7 @@ func main() {
 
 // cliOptions 保存解析后的命令行参数。
 type cliOptions struct {
+	auto       bool
 	head       string
 	tail       string
 	keep       string
@@ -105,6 +114,7 @@ func run(argv []string) error {
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() { fmt.Fprintf(os.Stderr, usage, ffmpeg.DefaultProxy) }
 
+	fs.BoolVar(&o.auto, "auto", false, "自动识别片头/片尾(静音检测+多集纠错)")
 	fs.StringVar(&o.head, "head", "", "要砍掉的片头时长(如 90 / 1m30s)")
 	fs.StringVar(&o.tail, "tail", "", "要砍掉的片尾时长(如 60 / 1m)")
 	fs.StringVar(&o.keep, "keep", "", "结尾额外保留的安全余量")
@@ -153,8 +163,12 @@ func run(argv []string) error {
 	if err != nil {
 		return fmt.Errorf("-min 参数无效: %w", err)
 	}
-	if head == 0 && tail == 0 {
-		return fmt.Errorf("请至少指定 -head 或 -tail 中的一个")
+	if o.auto {
+		if head != 0 || tail != 0 {
+			return fmt.Errorf("-auto 与 -head/-tail 不能同时使用(自动识别模式下切点由检测决定)")
+		}
+	} else if head == 0 && tail == 0 {
+		return fmt.Errorf("请至少指定 -head 或 -tail 中的一个,或使用 -auto 自动识别")
 	}
 	if head < 0 || tail < 0 || keep < 0 {
 		return fmt.Errorf("时长不能为负数")
@@ -218,8 +232,12 @@ func run(argv []string) error {
 	}
 
 	fmt.Printf("tvtrim %s\n", version)
-	fmt.Printf("  片头砍掉: %s\n", fmtDur(head))
-	fmt.Printf("  片尾砍掉: %s\n", fmtDur(tail))
+	if o.auto {
+		fmt.Printf("  模式    : 自动识别片头/片尾(静音检测)\n")
+	} else {
+		fmt.Printf("  片头砍掉: %s\n", fmtDur(head))
+		fmt.Printf("  片尾砍掉: %s\n", fmtDur(tail))
+	}
 	if keep > 0 {
 		fmt.Printf("  结尾余量: %s\n", fmtDur(keep))
 	}
@@ -232,8 +250,13 @@ func run(argv []string) error {
 	fmt.Println()
 
 	// dry-run 走单独路径:探测 + 展示计划,不执行。
-	if o.dryRun {
+	if o.dryRun && !o.auto {
 		return runDryRun(ctx, runner, items, trimOpts)
+	}
+
+	// 自动识别模式:先检测每集切点,再进入常规批量流程。
+	if o.auto {
+		return runAuto(ctx, runner, items, o, trimOpts)
 	}
 
 	batch := trim.RunBatch(ctx, runner, items, trim.BatchOptions{
@@ -253,11 +276,155 @@ func run(argv []string) error {
 	return nil
 }
 
-// runDryRun 只展示每个文件的裁剪计划。
-func runDryRun(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opts trim.Options) error {
-	plans := trim.Plans(ctx, runner, items, opts, 0)
-	var willRun, willSkip int
+// runAuto 执行自动识别模式:
+//
+//	阶段一 并发探测 + 静音检测(音频全片解码,是 auto 模式的主要耗时)
+//	阶段二 逐集识别切点
+//	阶段三 多集众数纠错(同一部剧每集 OP/ED 时长一致)
+//	阶段四 展示识别结果
+//	阶段五 按每集切点进入常规批量裁剪
+func runAuto(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, o cliOptions, trimOpts trim.Options) error {
+	workers := o.workers
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	if workers > len(items) && len(items) > 0 {
+		workers = len(items)
+	}
+	if workers < 1 {
+		workers = 1
+	}
 
+	type detectOut struct {
+		item  scan.Item
+		probe *ffmpeg.ProbeResult
+		res   auto.Result
+		err   error // 探测/静音检测/识别任一环节的失败
+	}
+	outCh := make(chan detectOut, len(items))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, workers)
+
+	for _, it := range items {
+		wg.Add(1)
+		go func(it scan.Item) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			probe, err := runner.Probe(ctx, it.Path)
+			if err != nil {
+				outCh <- detectOut{item: it, err: err}
+				return
+			}
+			total := probe.Duration.Seconds()
+			sils, err := runner.DetectSilences(ctx, it.Path, auto.NoiseDB, auto.MinSilence, total)
+			if err != nil {
+				outCh <- detectOut{item: it, probe: probe, err: err}
+				return
+			}
+			res, err := auto.Detect(total, sils)
+			outCh <- detectOut{item: it, probe: probe, res: res, err: err}
+		}(it)
+	}
+	go func() { wg.Wait(); close(outCh) }()
+
+	var ordered []detectOut
+	for d := range outCh {
+		ordered = append(ordered, d)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].item.Path < ordered[j].item.Path })
+
+	// 阶段二+三:识别成功的做多集众数纠错,并记录纠错前的一致率。
+	var oks []auto.Result // 按出现顺序收集的识别成功结果
+	var okIdx []int       // 各成功结果在 ordered 中的下标
+	for i, d := range ordered {
+		if d.err == nil && d.res.OK {
+			oks = append(oks, d.res)
+			okIdx = append(okIdx, i)
+		}
+	}
+	corrected := auto.Correct(oks) // Correct 不修改入参,返回纠错后的副本
+	for ci, oi := range okIdx {
+		r := corrected[ci]
+		if len(oks) > 1 {
+			agree, total := auto.Agreement(oks, ci) // 一致率按纠错前的原始结果计算
+			r.Note = fmt.Sprintf("[一致 %d/%d] ", agree, total) + r.Note
+		}
+		ordered[oi].res = r
+	}
+
+	// 阶段四:展示识别结果。
+	fmt.Printf("自动识别结果(静音阈值 %gdB, 切点静音 ≥%.1fs):\n\n", auto.NoiseDB, auto.MinSilence)
+	fmt.Printf("  %-44s %9s %9s  %s\n", "文件", "-head", "-tail", "说明")
+	fmt.Println("  " + strings.Repeat("-", 100))
+
+	override := make(map[string]trim.HeadTail, len(ordered))
+	var runItems []scan.Item
+	var failN int
+	for _, d := range ordered {
+		name := shortName(d.item.Path, 42)
+		switch {
+		case d.err != nil:
+			failN++
+			fmt.Printf("  %-44s %10s %10s  ✗ %v\n", name, "-", "-", d.err)
+		case !d.res.OK:
+			failN++
+			fmt.Printf("  %-44s %10s %10s  ✗ %s\n", name, "-", "-", d.res.Note)
+		default:
+			note := d.res.Note
+			if note == "" {
+				note = "OK"
+			}
+			fmt.Printf("  %-44s %9.1fs %9.1fs  %s\n", name, d.res.Head, d.res.Tail, note)
+			override[d.item.Path] = trim.HeadTail{
+				Head: time.Duration(d.res.Head * float64(time.Second)),
+				Tail: time.Duration(d.res.Tail * float64(time.Second)),
+			}
+			runItems = append(runItems, d.item)
+		}
+	}
+	fmt.Println("  " + strings.Repeat("-", 100))
+
+	// 识别全失败:没有可执行对象。
+	if len(runItems) == 0 {
+		return fmt.Errorf("自动识别全部失败,请改用 -head/-tail 手动指定")
+	}
+	if failN > 0 {
+		fmt.Printf("\n提示: %d 个文件识别失败,已跳过;其余 %d 个将按识别结果裁剪。\n", failN, len(runItems))
+	}
+
+	// 阶段五:按每集切点进入常规批量流程。
+	batch := trim.RunBatch(ctx, runner, runItems, trim.BatchOptions{
+		Trim:             trimOpts,
+		Workers:          o.workers,
+		Verbose:          o.verbose,
+		HeadTailOverride: override,
+	})
+
+	if o.dryRun {
+		var plans []*trim.Plan
+		for _, r := range batch.Results {
+			plans = append(plans, r.Plan)
+		}
+		fmt.Println()
+		printPlans(plans)
+		fmt.Println("\n这是 dry-run,未做任何修改。去掉 -dry-run 即可实际执行。")
+		return nil
+	}
+
+	printBatchSummary(batch, o.suffix, o.inplace)
+	if ctx.Err() != nil {
+		return fmt.Errorf("已中断")
+	}
+	if batch.Failed > 0 {
+		return fmt.Errorf("%d 个文件处理失败", batch.Failed)
+	}
+	return nil
+}
+
+// printPlans 打印裁剪计划表格,返回 (将执行, 跳过) 数量。
+func printPlans(plans []*trim.Plan) (willRun, willSkip int) {
 	fmt.Printf("%-46s %12s %10s %10s %10s\n", "文件", "总时长", "起点", "终点", "裁剪后")
 	fmt.Println(strings.Repeat("-", 94))
 
@@ -279,6 +446,13 @@ func runDryRun(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, op
 	}
 	fmt.Println(strings.Repeat("-", 94))
 	fmt.Printf("共 %d 个文件: %d 个将被裁剪, %d 个跳过\n", len(plans), willRun, willSkip)
+	return willRun, willSkip
+}
+
+// runDryRun 只展示每个文件的裁剪计划。
+func runDryRun(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opts trim.Options) error {
+	plans := trim.Plans(ctx, runner, items, opts, 0)
+	printPlans(plans)
 	fmt.Println("\n这是 dry-run,未做任何修改。去掉 -dry-run 即可实际执行。")
 	return nil
 }

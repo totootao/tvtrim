@@ -21,12 +21,21 @@ func statSize(path string) (int64, error) {
 	return st.Size(), nil
 }
 
+// HeadTail 是一对头尾时长,用于逐文件覆盖全局设置(自动识别模式)。
+type HeadTail struct {
+	Head time.Duration
+	Tail time.Duration
+}
+
 // BatchOptions 是批量处理的配置。
 type BatchOptions struct {
 	Trim      Options
 	Workers   int // 并发数,<=0 时按 CPU 核数自动决定
 	Verbose   bool
 	StopOnErr bool // 遇错是否中止(默认 false,继续处理其余文件)
+	// HeadTailOverride 为个别文件指定头尾时长,key 为文件路径
+	// (自动识别模式下每个文件的切点不同)。未列出的文件用 Trim.Head/Trim.Tail。
+	HeadTailOverride map[string]HeadTail
 }
 
 // BatchResult 汇总一次批量处理的结果。
@@ -102,7 +111,11 @@ func RunBatch(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opt
 		if po.item.Size > 0 {
 			res.TotalIn += po.item.Size
 		}
-		p := BuildPlan(po.probe, opts.Trim)
+		t := opts.Trim
+		if ht, ok := opts.HeadTailOverride[po.item.Path]; ok {
+			t.Head, t.Tail = ht.Head, ht.Tail
+		}
+		p := BuildPlan(po.probe, t)
 		plans = append(plans, p)
 	}
 
