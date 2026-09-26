@@ -95,8 +95,15 @@ func Locate(ctx context.Context, opts LocateOptions) (*Runner, error) {
 	}
 	cached := filepath.Join(cacheDir, cacheBinaryName())
 	if checkExecutable(cached) == nil {
-		report(fmt.Sprintf("使用缓存的 ffmpeg-trim: %s", cached))
-		return &Runner{Path: cached}, nil
+		// 缓存的二进制可能是旧版本(例如 ffmpeg-trim v1 换 v2 后体积变了):
+		// 字节数与当前资产清单不符即视为过期,删掉重新下载,
+		// 保证用户实际跑的始终是当前发布版本的 ffmpeg-trim。
+		if cacheUpToDate(cached) {
+			report(fmt.Sprintf("使用缓存的 ffmpeg-trim: %s", cached))
+			return &Runner{Path: cached}, nil
+		}
+		report("检测到缓存中的 ffmpeg-trim 已过期(与当前版本字节数不符),重新下载…")
+		os.Remove(cached)
 	}
 
 	// 5 的准备:PATH 兜底候选(下载失败或禁用下载时使用)。
@@ -137,6 +144,20 @@ func checkExecutable(path string) error {
 		return fmt.Errorf("%s 没有可执行权限,请先 chmod +x", path)
 	}
 	return nil
+}
+
+// cacheUpToDate 判断缓存中的二进制是否与当前资产清单一致(字节数相同)。
+// 当前架构没有已知的资产信息、或无法读取文件大小时返回 true(不拦截,保持可用)。
+func cacheUpToDate(cached string) bool {
+	a, err := pickAsset()
+	if err != nil || a.Size <= 0 {
+		return true
+	}
+	st, err := os.Stat(cached)
+	if err != nil {
+		return true
+	}
+	return st.Size() == a.Size
 }
 
 // lookTrimInPath 在 PATH 中查找 ffmpeg。

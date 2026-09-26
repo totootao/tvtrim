@@ -25,7 +25,7 @@ import (
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.0.0"
+var version = "1.1.0"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 

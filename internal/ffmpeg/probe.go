@@ -26,7 +26,7 @@ import (
 var ErrUnsupported = errors.New("不支持的容器格式")
 
 // 常见 TV 剧集容器。顺序即目录扫描时的匹配优先级。
-var SupportedExts = []string{".mp4", ".mkv", ".ts", ".avi", ".mp3"}
+var SupportedExts = []string{".mp4", ".mkv", ".ts", ".avi", ".mp3", ".webm", ".asf", ".wmv"}
 
 // Stream 描述输入文件中的一条流。
 type Stream struct {

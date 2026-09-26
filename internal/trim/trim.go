@@ -293,19 +293,23 @@ func formatSeconds(d time.Duration) string {
 }
 
 // muxerFor 根据输出文件扩展名选择 muxer。
-// ffmpeg-trim 内置的 muxer 只有 mp3/avi/mp4/matroska/mpegts,显式指定更稳。
+// 覆盖 ffmpeg-trim v2 内置且可输出的全部容器,显式指定比让 ffmpeg 猜更稳。
 func muxerFor(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".mp4", ".m4v", ".mov":
 		return "mp4"
 	case ".mkv":
 		return "matroska"
+	case ".webm":
+		return "webm"
 	case ".ts":
 		return "mpegts"
 	case ".avi":
 		return "avi"
 	case ".mp3":
 		return "mp3"
+	case ".asf", ".wmv":
+		return "asf"
 	default:
 		return "matroska"
 	}
