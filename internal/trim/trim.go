@@ -227,6 +227,13 @@ func (e *Executor) Run(ctx context.Context, plan *Plan) (string, error) {
 		return "", fmt.Errorf("ffmpeg 执行失败: %w\n%s", err, msg)
 	}
 
+	// 空输出检测:ffmpeg 对"容器能探测但流无法搬运"的输入(如未启用解码路径的
+	// webm 裸 VP8)可能静默产出几百字节的空文件且退出码为 0。校验兜底。
+	if st, err := os.Stat(writeTo); err == nil && st.Size() < 1024 {
+		os.Remove(writeTo)
+		return "", fmt.Errorf("输出异常(仅 %d 字节,疑似空文件),已删除: 输入流的编解码组件不受支持", st.Size())
+	}
+
 	if plan.IsInPlace() {
 		if err := os.Rename(tmpPath, plan.Output); err != nil {
 			return "", fmt.Errorf("替换原文件失败: %w", err)
@@ -269,6 +276,12 @@ func (e *Executor) buildArgs(plan *Plan, output string) []string {
 		"-map", "0",
 		"-c", "copy",
 	)
+
+	// mp4 输出加 faststart:把 moov 移到文件头,支持边下边播/快速起播。
+	// ffmpeg-trim 未启用 zlib 不影响该 flag;对其他容器不适用,仅 mp4/mov 加。
+	if m := muxerFor(output); m == "mp4" {
+		args = append(args, "-movflags", "+faststart")
+	}
 
 	args = append(args, "-f", muxerFor(output), output)
 	return args

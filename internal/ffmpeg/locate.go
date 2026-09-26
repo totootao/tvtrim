@@ -33,10 +33,11 @@ type asset struct {
 	Size   int64  // 期望字节数,用于下载校验
 }
 
-// 实测得到的资产清单(来自 ffmpeg-trim README 与仓库内容)。
+// 实测得到的资产清单(来自 ffmpeg-trim 仓库)。
+// v2 构建新增了静音检测滤镜与更多容器/解码器,体积略增。
 var assets = []asset{
-	{Name: "ffmpeg", GOARCH: "amd64", Size: 2259280},
-	{Name: "ffmpeg-aarch64", GOARCH: "arm64", Size: 2099440},
+	{Name: "ffmpeg", GOARCH: "amd64", Size: 2994224},
+	{Name: "ffmpeg-aarch64", GOARCH: "arm64", Size: 2690944},
 }
 
 // LocateOptions 控制 ffmpeg 二进制的定位行为。
@@ -55,11 +56,11 @@ type LocateOptions struct {
 //  1. Explicit(--ffmpeg 参数)
 //  2. TVTRIM_FFMPEG 环境变量
 //  3. 缓存目录中已下载的 ffmpeg-trim
-//  4. PATH 中的 ffmpeg(兜底,不校验是不是 trim 版)
-//  5. 从 ffmpeg-trim 仓库自动下载
+//  4. 从 ffmpeg-trim 仓库自动下载
+//  5. PATH 中的 ffmpeg(仅当禁用下载或下载失败时兜底)
 //
-// 注意缓存优先于 PATH:缓存里的必定是本项目下载的 ffmpeg-trim,
-// 而 PATH 里可能是带编码器的完整版 ffmpeg —— 两者参数语义并不完全一致
+// 注意 PATH 排在自动下载之后:项目指定的后端是 ffmpeg-trim,
+// PATH 里可能是带编码器的完整版 ffmpeg —— 参数语义并不完全一致
 // (例如完整版会接受输入侧 -ss,trim 版会静默忽略),优先用 trim 版更可预期。
 func Locate(ctx context.Context, opts LocateOptions) (*Runner, error) {
 	report := opts.Progress
@@ -98,22 +99,26 @@ func Locate(ctx context.Context, opts LocateOptions) (*Runner, error) {
 		return &Runner{Path: cached}, nil
 	}
 
-	// 4. PATH 里的 ffmpeg(兜底)
-	if p, err := lookTrimInPath(); err == nil {
-		if p != cached {
-			report(fmt.Sprintf("使用 PATH 中的 ffmpeg: %s", p))
-		}
-		return &Runner{Path: p}, nil
-	}
+	// 5 的准备:PATH 兜底候选(下载失败或禁用下载时使用)。
+	pathFallback, pathErr := lookTrimInPath()
 
 	if opts.NoDownload {
+		if pathErr == nil {
+			report(fmt.Sprintf("已禁用下载,使用 PATH 中的 ffmpeg: %s", pathFallback))
+			return &Runner{Path: pathFallback}, nil
+		}
 		return nil, fmt.Errorf("未找到可用的 ffmpeg,且已禁用自动下载。请用 --ffmpeg 指定路径")
 	}
 
-	// 5. 自动下载
+	// 4. 自动下载
 	report("本地未找到 ffmpeg-trim,开始自动下载…")
 	path, err := download(ctx, cacheDir, report)
 	if err != nil {
+		// 下载失败回退 PATH,并附带下载失败原因。
+		if pathErr == nil {
+			report(fmt.Sprintf("自动下载失败(%v),回退使用 PATH 中的 ffmpeg: %s", err, pathFallback))
+			return &Runner{Path: pathFallback}, nil
+		}
 		return nil, err
 	}
 	return &Runner{Path: path}, nil
@@ -234,7 +239,8 @@ func download(ctx context.Context, cacheDir string, report func(string)) (string
 	}
 
 	// 大小校验:防止代理返回了错误页或半截内容。
-	if n != a.Size {
+	// Size 为 0 表示未知(如新架构刚发布),跳过该校验。
+	if a.Size > 0 && n != a.Size {
 		return "", fmt.Errorf("下载内容大小异常: 期望 %d 字节,实际 %d 字节(代理可能返回了错误内容)", a.Size, n)
 	}
 
