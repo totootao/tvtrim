@@ -1,0 +1,19 @@
+# 编译产物
+/bin/
+/tvtrim
+tvtrim.exe
+*.test
+
+# 本地下载的 ffmpeg 缓存
+/.cache/
+/.ffmpeg-cache/
+
+# 运行时临时文件
+*.part
+*.tmp
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store
