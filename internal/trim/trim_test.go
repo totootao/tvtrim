@@ -1,6 +1,7 @@
 package trim
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -176,46 +177,58 @@ func TestMuxerFor(t *testing.T) {
 	}
 }
 
-// TestBuildArgsPlacesSSAfterInput 锁定一个关键约束:
-// ffmpeg-trim 会静默忽略 `-i` 之前的 `-ss`,所以 -ss/-to 都必须放在输入之后。
-// 早期版本把 -ss 放在输入前,导致片头根本没被砍掉,这里回归防护。
+// TestBuildArgsPlacesSSAfterInput 锁定几个关键约束:
+//   - ffmpeg-trim 会静默忽略 `-i` 之前的 `-ss`,所以 -ss 必须放在输入之后。
+//   - 用相对时长 -t(终点-起点)而非绝对 -to,裁剪长度与 muxer 无关。
+//   - 必须加 -avoid_negative_ts make_zero 与 -fflags +genpts 归零并重排时间戳。
+//
+// 早期版本把 -ss 放在输入前,导致片头根本没被砍掉;用 -to 则 asf/wmv 会因
+// 关键帧对齐多留一个 GOP。这里回归防护。
 func TestBuildArgsPlacesSSAfterInput(t *testing.T) {
 	exec := &Executor{FFmpeg: &ffmpeg.Runner{Path: "ffmpeg"}}
 	plan := BuildPlan(mkProbe("/tv/a.mp4", 1000), Options{Head: 90 * time.Second, Tail: 30 * time.Second})
 
 	args := exec.buildArgs(plan, "/tv/a-trim.mp4")
-	idxSS, idxI, idxTo, idxCopy := -1, -1, -1, -1
+	idxSS, idxI, idxT, idxCopy := -1, -1, -1, -1
 	for i, a := range args {
 		switch a {
 		case "-ss":
 			idxSS = i
 		case "-i":
 			idxI = i
-		case "-to":
-			idxTo = i
+		case "-t":
+			idxT = i
 		case "copy":
 			if i > 0 && args[i-1] == "-c" {
 				idxCopy = i
 			}
 		}
 	}
-	if idxSS < 0 || idxI < 0 || idxTo < 0 || idxCopy < 0 {
+	if idxSS < 0 || idxI < 0 || idxT < 0 || idxCopy < 0 {
 		t.Fatalf("参数缺失: %v", args)
 	}
 	if idxSS < idxI {
 		t.Errorf("-ss 必须在 -i 之后(ffmpeg-trim 会忽略输入侧 -ss): %v", args)
 	}
-	if idxTo < idxI {
-		t.Errorf("-to 必须在 -i 之后: %v", args)
+	if idxT < idxI {
+		t.Errorf("-t 必须在 -i 之后: %v", args)
 	}
-	if idxSS > idxTo {
-		t.Errorf("-ss 应排在 -to 之前: %v", args)
+	if idxSS > idxT {
+		t.Errorf("-ss 应排在 -t 之前: %v", args)
 	}
 	if got := args[idxSS+1]; got != "90.000" {
 		t.Errorf("-ss 值应为 90.000,实际 %q", got)
 	}
-	if got := args[idxTo+1]; got != "970.000" {
-		t.Errorf("-to 值应为 970.000,实际 %q", got)
+	// 裁剪时长 = (1000-30) - 90 = 880s
+	if got := args[idxT+1]; got != "880.000" {
+		t.Errorf("-t 值应为 880.000,实际 %q", got)
+	}
+	// 时间戳修正 flag 必须存在
+	if !slices.Contains(args, "-avoid_negative_ts") || !slices.Contains(args, "make_zero") {
+		t.Errorf("缺少 -avoid_negative_ts make_zero: %v", args)
+	}
+	if !slices.Contains(args, "-fflags") || !slices.Contains(args, "+genpts") {
+		t.Errorf("缺少 -fflags +genpts: %v", args)
 	}
 }
 

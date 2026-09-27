@@ -250,9 +250,14 @@ func (e *Executor) Run(ctx context.Context, plan *Plan) (string, error) {
 // 关键点(踩坑记录):
 //   - `-ss` 必须放在 `-i` 之后(输出侧定位)。
 //     ffmpeg-trim 是被裁剪过的构建,把 `-ss` 放在 `-i` 之前会被静默忽略,
-//     结果是片头根本没被砍掉。实测:输入侧 `-ss 5 -i in -to 25` 产出 25s,
+//     结果是片头根本没被砍掉。实测:输入侧 `-ss 5 -i in -to 25` 产出 25s(片头没砍),
 //     而输出侧 `-i in -ss 5 -to 25` 才正确产出 20s。
-//   - `-to` 放在 `-i` 之后,与 `-ss` 同为输出侧时间轴,语义一致。
+//   - 输出侧 `-ss` 会让 ffmpeg 定位到 `-ss` 之前最近的关键帧再开始搬运,
+//     因此输出首帧一定是关键帧 —— 即使源片含 B 帧,也不会出现"开头黑屏/绿屏"。
+//   - 用相对时长 `-t`(终点-起点)而非绝对 `-to`:裁剪长度与具体 muxer 无关,
+//     避免 asf/wmv 等容器按关键帧对齐、多保留一个 GOP 导致时长偏长。
+//   - `-avoid_negative_ts make_zero` + `-fflags +genpts`:把输出时间戳归零并重排 PTS。
+//     否则输出流保留源片原始时间戳(如从 90s 起播),部分播放器会黑屏、时长错或无法拖动。
 //   - `-c copy`:原样搬运,不重编码(ffmpeg-trim 本来也没有编码器)。
 //   - `-map 0`:保留所有流(多音轨、字幕轨)。
 func (e *Executor) buildArgs(plan *Plan, output string) []string {
@@ -267,14 +272,18 @@ func (e *Executor) buildArgs(plan *Plan, output string) []string {
 
 	args = append(args, "-i", plan.Input)
 
-	// -ss 与 -to 都放在输入之后,走输出侧时间轴。顺序必须是 ss 在前。
+	// -ss 放在 -i 之后(输出侧定位)。顺序必须是 ss 在前。
 	if plan.Start > 0 {
 		args = append(args, "-ss", formatSeconds(plan.Start))
 	}
+	// 相对时长 -t:裁剪长度与 muxer 无关,避免 asf/wmv 多留 GOP。
+	args = append(args, "-t", formatSeconds(plan.OutLength))
 	args = append(args,
-		"-to", formatSeconds(plan.End),
 		"-map", "0",
 		"-c", "copy",
+		// 归零时间戳 + 重排 PTS:根治"从源片时间点起播"导致的黑屏/时长错/DTS 非单调。
+		"-avoid_negative_ts", "make_zero",
+		"-fflags", "+genpts",
 	)
 
 	// mp4 输出加 faststart:把 moov 移到文件头,支持边下边播/快速起播。
