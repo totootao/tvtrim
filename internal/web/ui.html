@@ -58,6 +58,38 @@
   .err-box{margin:12px 20px;padding:10px 14px;border-radius:8px;background:#ff6b6b1a;
     border:1px solid #ff6b6b55;color:#ffc9c9;font-size:12.5px;white-space:pre-wrap}
   .tip{color:var(--dim);font-size:12px}
+
+  /* ---- 移动端适配(窄屏转卡片,桌面端完全不变) ---- */
+  @media (max-width: 720px){
+    body{font-size:14px}
+    header{padding:10px 12px;gap:8px}
+    h1{font-size:15px}
+    .meta{flex-basis:100%;font-size:11px}
+    .bar{margin-left:0;width:100%;gap:6px}
+    .bar button{flex:1}
+    main{padding:12px 10px 220px}
+    .show{margin-bottom:10px}
+    .show>summary{padding:10px 12px;gap:8px;flex-wrap:wrap}
+    .show .badge{font-size:10px;padding:1px 6px}
+    .show .acts{margin-left:0;flex-basis:100%;gap:6px}
+    .show .acts button{flex:1;padding:8px 10px}
+    /* 表格转为卡片 */
+    .show table, .show thead, .show tbody, .show tr, .show td{display:block;width:100%}
+    .show thead{display:none}
+    .show tr{border:1px solid var(--line);border-radius:8px;margin:10px 2px;padding:2px 0;background:#0d0f14}
+    .show tr.off{opacity:.55}
+    .show td{border-top:0;display:flex;justify-content:space-between;align-items:center;gap:12px;
+      padding:7px 12px;font-size:13px;text-align:right}
+    .show td::before{content:attr(data-label);color:var(--dim);font-size:12px;text-align:left;margin-right:auto}
+    .show td.file{white-space:normal;word-break:break-all}
+    input[type=number]{width:92px;padding:6px 8px;font-size:15px}
+    input[type=checkbox]{width:20px;height:20px}
+    .note{max-width:none}
+    footer{flex-direction:column;align-items:stretch;gap:8px;padding:10px 12px}
+    footer button{width:100%}
+    footer .progress{order:3;min-width:0}
+    footer .summary{order:4}
+  }
 </style>
 </head>
 <body>
@@ -117,12 +149,17 @@ function render(){
   const job = st.job || {};
   const statusOf = {};
   (job.items||[]).forEach(it=>{ statusOf[it.path] = it; });
+  // 任务进行中或已结束时,自动展开"参与了任务"的剧,方便看逐集进度与结果;
+  // 其余剧保持默认折叠,避免一屏被几十张表淹没。
+  const jobActive = job.running || job.finished;
+  const inJob = {};
+  (job.items||[]).forEach(it=>{ inJob[it.path]=true; });
 
   const main = document.getElementById("main");
   if(!st.shows.length){ main.innerHTML = '<div class="empty">没有可处理的剧集文件</div>'; updateFooter(); return; }
 
   main.innerHTML = st.shows.map(sh=>`
-    <details class="show" open>
+    <details class="show" ${(jobActive && sh.items.some(it=>inJob[it.path]))?'open':''}>
       <summary>
         <span class="caret">▶</span>
         <span>${esc(sh.name)}</span>
@@ -151,18 +188,18 @@ function render(){
           const s = statusOf[it.path] || {};
           const out = Math.max(0, (it.duration||0) - (+val(it.path,'head')) - (+val(it.path,'tail')));
           return `<tr class="${it.ready?'':'off'}">
-            <td><input type="checkbox" data-show="${esc(sh.id)}" data-path="${esc(it.path)}"
+            <td data-label="选择"><input type="checkbox" data-show="${esc(sh.id)}" data-path="${esc(it.path)}"
                  ${it.locked?'disabled':''} ${it.ready?'checked':''} ${s.status==='done'?'disabled':''}></td>
-            <td>${it.episode? 'EP'+String(it.episode).padStart(2,'0') : '-'}</td>
-            <td title="${esc(it.path)}">${esc(it.name)}</td>
-            <td class="num">${fmtDur(it.duration)}</td>
-            <td class="num">${fmtSize(it.size)}</td>
-            <td class="num"><input type="number" step="0.1" min="0" id="h:${esc(it.path)}" value="${fmtNum(it.head)}"
+            <td data-label="集">${it.episode? 'EP'+String(it.episode).padStart(2,'0') : '-'}</td>
+            <td class="file" data-label="文件" title="${esc(it.path)}">${esc(it.name)}</td>
+            <td class="num" data-label="时长">${fmtDur(it.duration)}</td>
+            <td class="num" data-label="大小">${fmtSize(it.size)}</td>
+            <td class="num" data-label="片头 -head"><input type="number" step="0.1" min="0" id="h:${esc(it.path)}" value="${fmtNum(it.head)}"
                  ${it.locked?'disabled':''} oninput="tick(this)"></td>
-            <td class="num"><input type="number" step="0.1" min="0" id="t:${esc(it.path)}" value="${fmtNum(it.tail)}"
+            <td class="num" data-label="片尾 -tail"><input type="number" step="0.1" min="0" id="t:${esc(it.path)}" value="${fmtNum(it.tail)}"
                  ${it.locked?'disabled':''} oninput="tick(this)"></td>
-            <td class="num" id="o:${esc(it.path)}">${fmtDur(out)}</td>
-            <td class="st-${s.status||'pending'}">
+            <td class="num" data-label="裁剪后" id="o:${esc(it.path)}">${fmtDur(out)}</td>
+            <td data-label="状态" class="st-${s.status||'pending'}">
               <span class="dot d-${s.status||'pending'}"></span>${statusText(s, it)}
             </td>
           </tr>`;
