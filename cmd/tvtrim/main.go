@@ -32,7 +32,7 @@ import (
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.5.2"
+var version = "1.5.3"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 
@@ -438,13 +438,15 @@ func runWeb(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
 	saveDetectCache(cache, cachePath, results)
 
 	probes := make(map[string]*ffmpeg.ProbeResult, len(results))
-	detects := make(map[string]auto.Result, len(results))
-	for _, d := range results {
-		if d.Probe != nil {
-			probes[d.Item.Path] = d.Probe
-		}
-		if detectMode == DetectSilence && d.OK() {
-			detects[d.Item.Path] = d.Res
+	// 手动模式不传 detects(nil),避免把手动指定的 head/tail 当成"未识别"覆盖掉;
+	// 只有自动模式才填充识别结果,失败项在 BuildShows 里被锁定。
+	var detects map[string]auto.Result
+	if detectMode == DetectSilence {
+		detects = make(map[string]auto.Result, len(results))
+		for _, d := range results {
+			if d.OK() {
+				detects[d.Item.Path] = d.Res
+			}
 		}
 	}
 	if detectMode == DetectSilence {

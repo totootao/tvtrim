@@ -357,6 +357,41 @@ func TestTotalSize(t *testing.T) {
 	}
 }
 
+// 剧名层级默认切点:手动模式取统一值,自动模式取就绪集众数,无就绪项归零。
+func TestShowDefaultHeadTail(t *testing.T) {
+	dir := "/media/def"
+
+	// 手动模式:所有集共享 30/45,剧名层级默认即 30/45。
+	sh := BuildShows([]scan.Item{
+		itemOf(dir, "S01E01.mkv", 1, 1, 1),
+		itemOf(dir, "S01E02.mkv", 1, 1, 2),
+	}, nil, nil, 30, 45)[0]
+	if sh.Head != 30 || sh.Tail != 45 {
+		t.Errorf("手动模式剧名默认 = %v/%v, 期望 30/45", sh.Head, sh.Tail)
+	}
+
+	// 自动模式:两集识别为 21.5/19.99,一集失败(排除),众数即 22/20(四舍五入到秒)。
+	res := map[string]auto.Result{
+		filepath.Join(dir, "S01E01.mkv"): {Head: 21.5, Tail: 19.99, OK: true, Note: "自动识别"},
+		filepath.Join(dir, "S01E02.mkv"): {Head: 21.5, Tail: 19.99, OK: true, Note: "自动识别"},
+		filepath.Join(dir, "S01E03.mkv"): {OK: false, Note: "片尾静音不足"},
+	}
+	sh = BuildShows([]scan.Item{
+		itemOf(dir, "S01E01.mkv", 1, 1, 1),
+		itemOf(dir, "S01E02.mkv", 1, 1, 2),
+		itemOf(dir, "S01E03.mkv", 1, 1, 3),
+	}, nil, res, 0, 0)[0]
+	if sh.Head != 22 || sh.Tail != 20 {
+		t.Errorf("自动模式剧名默认 = %v/%v, 期望 22/20", sh.Head, sh.Tail)
+	}
+
+	// 全部未就绪(纯手动 0/0):剧名层级默认归零,用户需自行填写。
+	sh = BuildShows([]scan.Item{itemOf(dir, "S01E01.mkv", 1, 1, 1)}, nil, nil, 0, 0)[0]
+	if sh.Head != 0 || sh.Tail != 0 {
+		t.Errorf("无默认切点剧名默认 = %v/%v, 期望 0/0", sh.Head, sh.Tail)
+	}
+}
+
 // Locked 区分"禁止编辑"(识别失败)与"可编辑"(手动或识别成功)。
 // 这是纯手动 Web 模式能用的前提:页面必须允许用户在 head/tail 为 0 的项上手动填值。
 func TestBuildShowsLockSemantics(t *testing.T) {

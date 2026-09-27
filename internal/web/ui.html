@@ -26,19 +26,17 @@
   button.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
   button.danger{background:var(--err)}
   main{padding:18px 20px 120px}
-  .show{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;overflow:hidden}
-  .show>summary{cursor:pointer;padding:12px 16px;display:flex;align-items:center;gap:12px;font-weight:600}
-  .show>summary::-webkit-details-marker{display:none}
-  .caret{color:var(--dim);transition:transform .15s;display:inline-block}
-  details[open] .caret{transform:rotate(90deg)}
+  /* ---- 剧名层级卡片(不再逐集列表) ---- */
+  .show{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-bottom:14px;padding:12px 16px}
+  .show-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .show-head .sname{font-weight:600;font-size:14px}
   .show .badge{font-size:11px;color:var(--dim);font-weight:400;border:1px solid var(--line);
     padding:1px 7px;border-radius:99px}
   .show .acts{margin-left:auto;display:flex;gap:8px}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{padding:8px 12px;border-top:1px solid var(--line);text-align:left;vertical-align:middle}
-  th{color:var(--dim);font-weight:500;font-size:12px;background:#00000020}
-  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-  tr.off td{opacity:.4}
+  .show-ctl{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:10px;
+    padding-top:10px;border-top:1px solid var(--line)}
+  .show-ctl .field{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px}
+  .show-ctl .preview{color:var(--dim);font-size:12.5px;font-variant-numeric:tabular-nums}
   input[type=number]{width:76px;background:#0d0f14;border:1px solid var(--line);color:var(--text);
     border-radius:5px;padding:4px 6px;font:inherit}
   input[type=number]:focus{outline:1px solid var(--accent);border-color:var(--accent)}
@@ -59,7 +57,7 @@
     border:1px solid #ff6b6b55;color:#ffc9c9;font-size:12.5px;white-space:pre-wrap}
   .tip{color:var(--dim);font-size:12px}
 
-  /* ---- 移动端适配(窄屏转卡片,桌面端完全不变) ---- */
+  /* ---- 移动端适配(窄屏卡片式,桌面端完全不变) ---- */
   @media (max-width: 720px){
     body{font-size:14px}
     header{padding:10px 12px;gap:8px}
@@ -68,23 +66,15 @@
     .bar{margin-left:0;width:100%;gap:6px}
     .bar button{flex:1}
     main{padding:12px 10px 220px}
-    .show{margin-bottom:10px}
-    .show>summary{padding:10px 12px;gap:8px;flex-wrap:wrap}
+    .show{margin-bottom:10px;padding:10px 12px}
+    .show-head{gap:8px}
     .show .badge{font-size:10px;padding:1px 6px}
     .show .acts{margin-left:0;flex-basis:100%;gap:6px}
     .show .acts button{flex:1;padding:8px 10px}
-    /* 表格转为卡片 */
-    .show table, .show thead, .show tbody, .show tr, .show td{display:block;width:100%}
-    .show thead{display:none}
-    .show tr{border:1px solid var(--line);border-radius:8px;margin:10px 2px;padding:2px 0;background:#0d0f14}
-    .show tr.off{opacity:.55}
-    .show td{border-top:0;display:flex;justify-content:space-between;align-items:center;gap:12px;
-      padding:7px 12px;font-size:13px;text-align:right}
-    .show td::before{content:attr(data-label);color:var(--dim);font-size:12px;text-align:left;margin-right:auto}
-    .show td.file{white-space:normal;word-break:break-all}
+    .show-ctl{margin-top:8px;padding-top:8px;gap:10px}
+    .show-ctl .field{font-size:13px}
     input[type=number]{width:92px;padding:6px 8px;font-size:15px}
     input[type=checkbox]{width:20px;height:20px}
-    .note{max-width:none}
     footer{flex-direction:column;align-items:stretch;gap:8px;padding:10px 12px}
     footer button{width:100%}
     footer .progress{order:3;min-width:0}
@@ -149,118 +139,92 @@ function render(){
   const job = st.job || {};
   const statusOf = {};
   (job.items||[]).forEach(it=>{ statusOf[it.path] = it; });
-  // 任务进行中或已结束时,自动展开"参与了任务"的剧,方便看逐集进度与结果;
-  // 其余剧保持默认折叠,避免一屏被几十张表淹没。
-  const jobActive = job.running || job.finished;
-  const inJob = {};
-  (job.items||[]).forEach(it=>{ inJob[it.path]=true; });
-
   const main = document.getElementById("main");
   if(!st.shows.length){ main.innerHTML = '<div class="empty">没有可处理的剧集文件</div>'; updateFooter(); return; }
 
-  main.innerHTML = st.shows.map(sh=>`
-    <details class="show" ${(jobActive && sh.items.some(it=>inJob[it.path]))?'open':''}>
-      <summary>
-        <span class="caret">▶</span>
-        <span>${esc(sh.name)}</span>
+  main.innerHTML = st.shows.map(sh=>{
+    const hId = "sh:HEAD:"+sh.id, tId = "sh:TAIL:"+sh.id;
+    const total = sh.items.reduce((a,it)=>a+(it.duration||0),0);
+    const outAll = Math.max(0, total - (+showVal(sh.id,'head'))*sh.items.length - (+showVal(sh.id,'tail'))*sh.items.length);
+    // 任务进行中/完成后展示该剧整体进度(按路径匹配逐集状态聚合)。
+    let stTag = "";
+    const js = sh.items.map(it=>statusOf[it.path]).filter(Boolean);
+    if(js.length){
+      const done=js.filter(x=>x.status==='done').length, fail=js.filter(x=>x.status==='failed').length;
+      if(js.some(x=>x.status==='running')) stTag = `处理中 ${done}/${js.length}`;
+      else if(done+fail===js.length) stTag = `完成 ${done}${fail?(' · 失败'+fail):''}`;
+    }
+    return `
+    <div class="show" id="show:${esc(sh.id)}">
+      <div class="show-head">
+        <input type="checkbox" data-show="${esc(sh.id)}" ${sh.head>0||sh.tail>0?'checked':''}>
+        <span class="sname">${esc(sh.name)}</span>
         <span class="badge">${sh.items.length} 集</span>
-        <span class="badge">可裁剪 ${sh.ready}</span>
         <span class="badge">${fmtSize(sh.total_in)}</span>
+        <span class="badge st-running">${esc(stTag)}</span>
         <span class="acts">
           <button class="ghost" onclick="pick('${esc(sh.id)}',true);return false;">选本剧</button>
           <button onclick="runShow('${esc(sh.id)}');return false;">确认执行本剧</button>
         </span>
-      </summary>
-      <table>
-        <thead><tr>
-          <th style="width:34px"></th>
-          <th>集</th>
-          <th>文件</th>
-          <th class="num">时长</th>
-          <th class="num">大小</th>
-          <th class="num">片头 -head</th>
-          <th class="num">片尾 -tail</th>
-          <th class="num">裁剪后</th>
-          <th>状态</th>
-        </tr></thead>
-        <tbody>
-        ${sh.items.map(it=>{
-          const s = statusOf[it.path] || {};
-          const out = Math.max(0, (it.duration||0) - (+val(it.path,'head')) - (+val(it.path,'tail')));
-          return `<tr class="${it.ready?'':'off'}">
-            <td data-label="选择"><input type="checkbox" data-show="${esc(sh.id)}" data-path="${esc(it.path)}"
-                 ${it.locked?'disabled':''} ${it.ready?'checked':''} ${s.status==='done'?'disabled':''}></td>
-            <td data-label="集">${it.episode? 'EP'+String(it.episode).padStart(2,'0') : '-'}</td>
-            <td class="file" data-label="文件" title="${esc(it.path)}">${esc(it.name)}</td>
-            <td class="num" data-label="时长">${fmtDur(it.duration)}</td>
-            <td class="num" data-label="大小">${fmtSize(it.size)}</td>
-            <td class="num" data-label="片头 -head"><input type="number" step="0.1" min="0" id="h:${esc(it.path)}" value="${fmtNum(it.head)}"
-                 ${it.locked?'disabled':''} oninput="tick(this)"></td>
-            <td class="num" data-label="片尾 -tail"><input type="number" step="0.1" min="0" id="t:${esc(it.path)}" value="${fmtNum(it.tail)}"
-                 ${it.locked?'disabled':''} oninput="tick(this)"></td>
-            <td class="num" data-label="裁剪后" id="o:${esc(it.path)}">${fmtDur(out)}</td>
-            <td data-label="状态" class="st-${s.status||'pending'}">
-              <span class="dot d-${s.status||'pending'}"></span>${statusText(s, it)}
-            </td>
-          </tr>`;
-        }).join("")}
-        </tbody>
-      </table>
-    </details>`).join("");
+      </div>
+      <div class="show-ctl">
+        <label class="field">片头 -head
+          <input type="number" step="0.1" min="0" id="${hId}" value="${fmtNum(sh.head)}" oninput="tickShow(this)">
+        </label>
+        <label class="field">片尾 -tail
+          <input type="number" step="0.1" min="0" id="${tId}" value="${fmtNum(sh.tail)}" oninput="tickShow(this)">
+        </label>
+        <span class="preview">总时长 ${fmtDur(total)} → 裁剪后约 ${fmtDur(outAll)}</span>
+      </div>
+    </div>`;
+  }).join("");
 
   if(job.error){ main.insertAdjacentHTML("afterbegin", `<div class="err-box">${esc(job.error)}</div>`); }
   updateFooter();
 }
 
-function statusText(s, it){
-  if(s.status==="done") return "完成";
-  if(s.status==="failed") return "失败: " + esc((s.msg||"").split("\n").pop());
-  if(s.status==="running") return "处理中";
-  return it.ready ? esc(trimNote(it.note)) : esc(trimNote(it.note||"未就绪"));
-}
-function trimNote(s){ return String(s||"").replace(/\n/g," ").slice(0,40); }
 function fmtNum(v){ return v==null?0:(Math.round(v*10)/10); }
 
-function val(path, kind){
-  const el = document.getElementById((kind==='head'?'h:':'t:')+path);
+// showVal 读取"剧名层级"输入框的实时头尾值。
+function showVal(id, kind){
+  const el = document.getElementById("sh:"+(kind==='head'?'HEAD':'TAIL')+":"+id);
   if(el) return parseFloat(el.value)||0;
-  const it = findItem(path); return kind==='head' ? (it?it.head:0) : (it?it.tail:0);
+  const sh = state.shows.find(s=>s.id===id);
+  return sh ? (kind==='head'?sh.head:sh.tail) : 0;
 }
-function findItem(path){
-  for(const sh of state.shows) for(const it of sh.items) if(it.path===path) return it;
-  return null;
-}
-function tick(input){
-  const path = input.id.slice(2);
-  const it = findItem(path); if(!it) return;
-  const h = val(path,'head'), t = val(path,'tail');
-  const el = document.getElementById("o:"+path);
-  if(el) el.textContent = fmtDur(Math.max(0,(it.duration||0)-h-t));
-}
-function pick(id, on){
-  document.querySelectorAll(`input[data-show="${cssEsc(id)}"]`).forEach(cb=>{
-    if(!cb.disabled) { cb.checked = on; }
-  });
-  updateFooter();
+// tickShow 在剧名层级头尾变化时,刷新该剧的"总时长 → 裁剪后"预览。
+function tickShow(input){
+  const m = input.id.split(":");      // sh:HEAD:<id> / sh:TAIL:<id>
+  const id = m[2]; if(!id) return;
+  const sh = state.shows.find(s=>s.id===id); if(!sh) return;
+  const total = sh.items.reduce((a,it)=>a+(it.duration||0),0);
+  const out = Math.max(0, total - showVal(id,'head')*sh.items.length - showVal(id,'tail')*sh.items.length);
+  const prev = document.querySelector(`[id="show:${id}"] .preview`);
+  if(prev) prev.textContent = `总时长 ${fmtDur(total)} → 裁剪后约 ${fmtDur(out)}`;
 }
 function cssEsc(s){ return String(s).replace(/["\\]/g,'\\$&'); }
-function selectAll(on){ state.shows.forEach(sh=>pick(sh.id,on)); }
-function checkedItems(){
-  const out = [];
-  document.querySelectorAll('input[type=checkbox][data-path]').forEach(cb=>{
-    if(!cb.checked || cb.disabled) return;
-    const p = cb.getAttribute('data-path');
-    out.push({path:p, head:val(p,'head'), tail:val(p,'tail')});
-  });
-  return out;
+function pick(id, on){
+  const cb = document.querySelector(`input[data-show="${cssEsc(id)}"]`);
+  if(cb && !cb.disabled) cb.checked = on;
+  updateFooter();
 }
+function selectAll(on){ state.shows.forEach(sh=>pick(sh.id,on)); }
+
+// 剧名层级:一部剧的所有集统一套用该剧的头尾(不再逐集显示/编辑)。
 function itemsOfShow(id){
   const sh = state.shows.find(s=>s.id===id); if(!sh) return [];
-  // 收集该剧所有未锁定项;读取输入框实时值,没填切点的(head==tail==0)跳过。
-  // 这样纯手动模式下只有用户实际填了切点的集才会被执行。
-  return sh.items.filter(it=>!it.locked).map(it=>({
-    path:it.path, head:val(it.path,'head'), tail:val(it.path,'tail')
-  })).filter(x=>x.head>0||x.tail>0);
+  const h = showVal(id,'head'), t = showVal(id,'tail');
+  if(h<=0 && t<=0) return [];   // 头尾都为 0 视为"本剧不裁剪"
+  return sh.items.map(it=>({path:it.path, head:h, tail:t}));
+}
+// 全局"执行选中":收集所有勾选剧名下的全部集。
+function checkedItems(){
+  const out = [];
+  document.querySelectorAll('input[type=checkbox][data-show]').forEach(cb=>{
+    if(!cb.checked || cb.disabled) return;
+    out.push(...itemsOfShow(cb.getAttribute('data-show')));
+  });
+  return out;
 }
 
 function updateFooter(){

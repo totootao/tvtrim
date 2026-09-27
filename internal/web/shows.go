@@ -51,6 +51,12 @@ type Show struct {
 	Items   []Item `json:"items"`
 	Ready   int    `json:"ready"` // 可执行的集数
 	TotalIn int64  `json:"total_in"`
+	// Head/Tail 是"剧名层级"的默认切点(秒):页面在剧这一行统一填写,
+	// 确认时套用到该剧全部集,不再逐集显示/编辑。
+	//   - 手动模式:全部集共享同一 headSec/tailSec,这里就是它
+	//   - 自动模式:取就绪集 (head,tail) 的众数,作为"整部剧"的默认建议
+	Head float64 `json:"head"`
+	Tail float64 `json:"tail"`
 }
 
 // BuildShows 把扫描结果与探测/识别结果组装成分组视图。
@@ -160,9 +166,36 @@ func BuildShows(items []scan.Item, probes map[string]*ffmpeg.ProbeResult,
 			}
 			return a.Name < b.Name
 		})
+		sh.Head, sh.Tail = showDefaultHeadTail(sh)
 		shows = append(shows, *sh)
 	}
 	return shows
+}
+
+// showDefaultHeadTail 计算"剧名层级"的默认切点:
+//   - 手动模式:所有集共享同一 headSec/tailSec,众数即该值
+//   - 自动模式:取就绪集 (head,tail) 的众数,作为整部剧的默认建议
+//
+// 没有任何就绪集时返回 0,0(用户需自行填写)。
+func showDefaultHeadTail(sh *Show) (head, tail float64) {
+	counts := map[[2]int]int{}
+	for _, it := range sh.Items {
+		if !it.Ready {
+			continue
+		}
+		counts[[2]int{int(it.Head + 0.5), int(it.Tail + 0.5)}]++
+	}
+	best := [2]int{0, 0}
+	bestN := 0
+	for k, n := range counts {
+		if n > bestN {
+			bestN, best = n, k
+		}
+	}
+	if bestN == 0 {
+		return 0, 0
+	}
+	return float64(best[0]), float64(best[1])
 }
 
 // Summary 是 show 列表的聚合信息,用于页面顶部展示。
