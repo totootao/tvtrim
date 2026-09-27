@@ -30,7 +30,7 @@ import (
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.4.2"
+var version = "1.4.3"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 
@@ -109,6 +109,7 @@ type cliOptions struct {
 	output     string
 	recursive  bool
 	workers    int
+	sample     int
 	dryRun     bool
 	overwrite  bool
 	minDur     string
@@ -139,6 +140,7 @@ func run(argv []string) error {
 	fs.StringVar(&o.output, "o", "", "显式指定输出文件(仅单文件模式)")
 	fs.BoolVar(&o.recursive, "r", false, "递归处理子目录")
 	fs.IntVar(&o.workers, "j", 0, "并发数,默认 CPU 核数")
+	fs.IntVar(&o.sample, "sample", DefaultSamplePerShow, "-auto 时每部剧抽样几集做静音检测,0 表示每集都测")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "只预览不执行")
 	fs.BoolVar(&o.overwrite, "overwrite", false, "允许覆盖已存在的输出")
 	fs.StringVar(&o.minDur, "min", "10s", "输出时长下限")
@@ -314,7 +316,9 @@ func run(argv []string) error {
 //	阶段二 展示识别结果
 //	阶段三 按每集切点进入常规批量裁剪
 func runAuto(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, o cliOptions, trimOpts trim.Options) error {
-	results := detectAll(ctx, runner, items, o.workers, DetectSilence)
+	results := detectAll(ctx, runner, items, detectConfig{
+		Mode: DetectSilence, Workers: o.workers, Sample: o.sample, Out: os.Stdout,
+	})
 
 	// 阶段二:展示识别结果。
 	runItems := runnableItems(results)
@@ -398,7 +402,12 @@ func runWeb(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
 	}
 
 	fmt.Printf("正在%s(%d 个文件)…\n", map[bool]string{true: "自动识别切点", false: "探测媒体信息"}[o.auto], len(items))
-	results := detectAll(ctx, runner, items, o.workers, detectMode)
+	if o.auto && o.sample > 0 {
+		fmt.Printf("  (每部剧抽样 %d 集检测,其余沿用本剧结论)\n", o.sample)
+	}
+	results := detectAll(ctx, runner, items, detectConfig{
+		Mode: detectMode, Workers: o.workers, Sample: o.sample, Out: os.Stdout,
+	})
 
 	probes := make(map[string]*ffmpeg.ProbeResult, len(results))
 	detects := make(map[string]auto.Result, len(results))
@@ -469,7 +478,7 @@ func printPlans(plans []*trim.Plan) (willRun, willSkip int) {
 
 	for _, p := range plans {
 		// 剧名从文件名解析(scan.ShowOf),解析不出时用目录名兜底。
-		show := shortName(showNameOf(scan.Item{Path: p.Input, Show: scan.ShowOf(filepath.Base(p.Input))}), 14)
+		show := shortName(showNameOf(scan.Item{Path: p.Input, Show: scan.ShowOfPath(p.Input)}), 14)
 		name := shortName(p.Input, 28)
 		if p.Skip {
 			willSkip++

@@ -75,7 +75,7 @@ func TestDetectAllProbeOnly(t *testing.T) {
 	runner := newRunner(t)
 	items := sampleItems(t, 2)
 
-	got := detectAll(context.Background(), runner, items, 2, DetectProbeOnly)
+	got := detectAll(context.Background(), runner, items, detectConfig{Workers: 2, Mode: DetectProbeOnly})
 	if len(got) != 2 {
 		t.Fatalf("结果数 = %d, 期望 2", len(got))
 	}
@@ -105,7 +105,7 @@ func TestDetectAllSilenceWithModeCorrection(t *testing.T) {
 	runner := newRunner(t)
 	items := sampleItems(t, 3)
 
-	got := detectAll(context.Background(), runner, items, 0, DetectSilence) // workers=0 → 自动取核数
+	got := detectAll(context.Background(), runner, items, detectConfig{Mode: DetectSilence}) // Workers=0 → 自动取核数
 	if len(got) != 3 {
 		t.Fatalf("结果数 = %d, 期望 3", len(got))
 	}
