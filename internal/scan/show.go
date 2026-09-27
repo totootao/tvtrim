@@ -42,6 +42,30 @@ func ShowOf(name string) string {
 	return CleanShow(base[:idx])
 }
 
+// seasonDirRe 匹配纯季目录名:S01 / S1 / Season 1 / Season01 / 第1季。
+var seasonDirRe = regexp.MustCompile(`(?i)^\s*(?:s\s*\d{1,3}|season\s*\d{1,3}|第\s*\d{1,3}\s*季)\s*$`)
+
+// ShowOfPath 从完整路径推断剧名,比 ShowOf 更适合真实的剧集库布局。
+//
+// 优先级:文件名里的剧名 > 父目录名 > 祖父目录名。
+// 父目录名是纯季目录(如 剧名/S01/E01.mkv 里的 S01)时再往上一层取剧名,
+// 于是同一部剧的第二季也显示为同一个剧名,而不是 "S02"。
+func ShowOfPath(path string) string {
+	if s := ShowOf(filepath.Base(path)); s != "" {
+		return s
+	}
+	dir := filepath.Dir(path)
+	name := filepath.Base(dir)
+	if seasonDirRe.MatchString(name) {
+		if parent := filepath.Base(filepath.Dir(dir)); parent != "" &&
+			parent != string(filepath.Separator) && parent != "." {
+			name = parent
+		}
+	}
+	// 目录名同样清洗一下(去掉 year / 1080p / 尾部的 S01 等)。
+	return CleanShow(strings.TrimSuffix(name, filepath.Ext(name)))
+}
+
 // indexEpisodeMark 返回文件名中第一个季集标记的下标,找不到返回 -1。
 // 顺序与 ParseEpisode 一致:SxxExx 优先,其次"第N集",最后 EPxx/E xx。
 func indexEpisodeMark(s string) int {
@@ -127,8 +151,18 @@ func CleanShow(title string) string {
 		if len(fields) == 0 {
 			return ""
 		}
+		// 先试最后两个词:"Season 2" 这种带空格的季标记要一起剥。
+		// len 至少留 2 个词才动手,免得 "Season 2" 本身被剥空。
+		if len(fields) > 2 && seasonDirRe.MatchString(
+			strings.ToLower(strings.Join(fields[len(fields)-2:], ""))) {
+			s = strings.Join(fields[:len(fields)-2], " ")
+			s = strings.TrimRight(strings.TrimSpace(s), "-–—_ .")
+			continue
+		}
 		last := strings.ToLower(fields[len(fields)-1])
-		if junkTokens[last] {
+		// 尾部的季标记("进击的巨人 S01" / "... Season 2")同样剥掉,
+		// 让不同季共享同一个剧名。只剩这一个词时不剥,免得剧名变空。
+		if junkTokens[last] || (len(fields) > 1 && seasonDirRe.MatchString(last)) {
 			s = strings.Join(fields[:len(fields)-1], " ")
 			s = strings.TrimRight(strings.TrimSpace(s), "-–—_ .")
 			continue

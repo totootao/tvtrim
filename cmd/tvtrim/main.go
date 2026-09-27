@@ -30,7 +30,7 @@ import (
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.4.1"
+var version = "1.4.2"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 

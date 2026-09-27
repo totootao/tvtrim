@@ -89,7 +89,7 @@ func Collect(inputs []string, opts Options) ([]Item, error) {
 		season, episode := ParseEpisode(base)
 		items = append(items, Item{
 			Path: abs, Size: st.Size(), Season: season, Episode: episode,
-			Show: ShowOf(base),
+			Show: ShowOfPath(abs),
 		})
 		return nil
 	}

@@ -139,7 +139,92 @@ func TestCollectFillsShow(t *testing.T) {
 	if byName["权力的游戏.S01E01.mkv"] != "权力的游戏" {
 		t.Errorf("剧名 = %q", byName["权力的游戏.S01E01.mkv"])
 	}
-	if byName["no-name.mkv"] != "" {
-		t.Errorf("无剧名文件应为空,实际 %q", byName["no-name.mkv"])
+	// 文件名解析不出剧名时,退回到所在目录名(而不是留空)。
+	if want := CleanShow(filepath.Base(dir)); byName["no-name.mkv"] != want {
+		t.Errorf("无剧名文件应借用目录名 %q, 实际 %q", want, byName["no-name.mkv"])
+	}
+}
+
+// TestCollectFillsShowAcrossSeasonDirs 覆盖 剧名/季/集 的两级布局:
+// 文件名没有剧名时,应跳过纯季目录向上取到真正的剧名。
+func TestCollectFillsShowAcrossSeasonDirs(t *testing.T) {
+	root := t.TempDir()
+	s1 := filepath.Join(root, "进击的巨人", "S01")
+	s2 := filepath.Join(root, "进击的巨人", "S02")
+	mkVideo(t, s1, "S01E01.mkv", "S01E02.mkv")
+	mkVideo(t, s2, "S02E01.mkv")
+
+	items, err := Collect([]string{root}, Options{Recursive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("数量 = %d", len(items))
+	}
+	for _, it := range items {
+		if it.Show != "进击的巨人" {
+			t.Errorf("%s 的剧名 = %q, 需要 进击的巨人", filepath.Base(it.Path), it.Show)
+		}
+	}
+	// 两季应算同一部剧。
+	if got := CountShows(items); got != 1 {
+		t.Errorf("CountShows = %d, 应为 1(两季同属一部剧)", got)
+	}
+}
+
+func TestShowOfPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want string
+	}{
+		// 文件名里有剧名时,永远以文件名为准。
+		{"/media/进击的巨人.S01E01.mkv", "进击的巨人"},
+		{"/media/剧A/进击的巨人.S01E01.mkv", "进击的巨人"},
+		{"/media/进击的巨人/S01/S01E01.mkv", "进击的巨人"},
+		// 文件名没剧名 → 借用父目录名。
+		{"/media/进击的巨人.S01/S01E01.mkv", "进击的巨人"},
+		{"/media/The.Show.1080p/S01E01.mkv", "The Show"},
+		{"/media/权力的游戏/S01E01.mkv", "权力的游戏"},
+		// 父目录是纯季目录 → 跳过它,用祖父目录名。
+		{"/media/进击的巨人/S01/E01.mkv", "进击的巨人"},
+		{"/media/进击的巨人/S02/E01.mkv", "进击的巨人"},
+		{"/media/权力的游戏/Season 3/E01.mkv", "权力的游戏"},
+		{"/media/权力的游戏/Season3/E01.mkv", "权力的游戏"},
+		{"/media/权力的游戏/第1季/E01.mkv", "权力的游戏"},
+		// 目录名本身就趴在根上:没有更多层级可借,保留目录名。
+		{"/S01/E01.mkv", "S01"},
+	}
+	for _, c := range cases {
+		if got := ShowOfPath(c.path); got != c.want {
+			t.Errorf("ShowOfPath(%q) = %q, 需要 %q", c.path, got, c.want)
+		}
+	}
+}
+
+// TestShowOfPathKeepsSeasonInDirName 验证非季目录不会被误判跳过。
+func TestShowOfPathKeepsSeasonInDirName(t *testing.T) {
+	if got := ShowOfPath("/media/权力的游戏.S03/S03E01.mkv"); got != "权力的游戏" {
+		t.Errorf("目录名里的季标记应被剥掉,实际 %q", got)
+	}
+}
+
+func TestCleanShowStripsSeasonSuffix(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"进击的巨人.S01", "进击的巨人"},
+		{"权力的游戏 Season 2", "权力的游戏"},
+		{"权力的游戏 第2季", "权力的游戏"},
+		{"权力的游戏 S02 1080p", "权力的游戏"},
+	}
+	for _, c := range cases {
+		if got := CleanShow(c.in); got != c.want {
+			t.Errorf("CleanShow(%q) = %q, 需要 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestCleanShowKeepsLoneSeasonToken 只有季标记一个词时不剥,否则剧名会空掉。
+func TestCleanShowKeepsLoneSeasonToken(t *testing.T) {
+	if got := CleanShow("S01"); got != "S01" {
+		t.Errorf("CleanShow(\"S01\") = %q, 应保留", got)
 	}
 }
