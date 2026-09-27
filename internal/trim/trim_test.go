@@ -241,3 +241,50 @@ func TestBuildArgsOmitsSSWhenZero(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildArgsInjectsITSOffset 锁定时间戳补偿的关键约束:
+// -itsoffset 是输入侧选项,必须出现在 -i 之前;
+// 它用来抵消输出侧 -ss 回溯到关键帧造成的"视频流起点偏移"。
+func TestBuildArgsInjectsITSOffset(t *testing.T) {
+	exec := &Executor{FFmpeg: &ffmpeg.Runner{Path: "ffmpeg"}}
+	plan := BuildPlan(mkProbe("/tv/a.mp4", 1000), Options{Head: 90 * time.Second, Tail: 30 * time.Second})
+	plan.TSOffset = 9954 * time.Millisecond
+
+	args := exec.buildArgs(plan, "/tv/a-trim.mp4")
+	idxOff, idxI := -1, -1
+	for i, a := range args {
+		switch a {
+		case "-itsoffset":
+			idxOff = i
+		case "-i":
+			idxI = i
+		}
+	}
+	if idxOff < 0 {
+		t.Fatalf("TSOffset>0 时必须出现 -itsoffset: %v", args)
+	}
+	if idxI < 0 {
+		t.Fatalf("缺少 -i: %v", args)
+	}
+	if idxOff > idxI {
+		t.Errorf("-itsoffset 必须放在 -i 之前(输入侧选项): %v", args)
+	}
+	if got := args[idxOff+1]; got != "9.954" {
+		t.Errorf("-itsoffset 值应为 9.954,实际 %q", got)
+	}
+}
+
+// TestBuildArgsNoITSOffsetWhenZero TSOffset 为 0 时不应写入 -itsoffset,
+// 保持与旧版本完全一致的命令行(避免影响本来正常的文件)。
+func TestBuildArgsNoITSOffsetWhenZero(t *testing.T) {
+	exec := &Executor{FFmpeg: &ffmpeg.Runner{Path: "ffmpeg"}}
+	plan := BuildPlan(mkProbe("/tv/a.mp4", 1000), Options{Head: 90 * time.Second, Tail: 30 * time.Second})
+	if plan.TSOffset != 0 {
+		t.Fatalf("新构造的 plan 不应带 TSOffset,实际 %v", plan.TSOffset)
+	}
+	for _, a := range exec.buildArgs(plan, "/tv/a-trim.mp4") {
+		if a == "-itsoffset" {
+			t.Errorf("TSOffset=0 时不应出现 -itsoffset: %v", exec.buildArgs(plan, "/tv/a-trim.mp4"))
+		}
+	}
+}

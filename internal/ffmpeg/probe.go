@@ -171,6 +171,89 @@ func (r *Runner) Probe(ctx context.Context, path string) (*ProbeResult, error) {
 	return res, nil
 }
 
+// reDebugTSVideo 匹配 `-debug_ts` 输出的首个视频包所在行,捕获其中的 DTS:
+//
+//	[vist#0:0/hevc @ 0x...] demuxer -> ist_index:0:0 type:video pkt_pts:7204140 pkt_pts_time:80.046 pkt_dts:7196940 pkt_dts_time:79.966 ...
+//
+// 注意 `type:video` 之后先跟 `pkt_pts:<整数>`,再才是 `pkt_pts_time:<浮点>`、`pkt_dts:*`,中间不能漏。
+//
+// 为什么取 DTS 而不是 PTS:含 B 帧的流里首个视频包的 PTS 会晚于它的 DTS(差一个
+// B 帧时长),而 ffmpeg 搬移/对齐时间是按 DTS 走的。实测用 PTS 算出的补偿量会差
+// 一个 B 帧(如 0.08s 残留),用 DTS 才能把视频流起点精确归零。
+var reDebugTSVideo = regexp.MustCompile(`demuxer -> ist_index:\d+:\d+ type:video pkt_pts:-?\d+ pkt_pts_time:-?[\d.]+ pkt_dts:-?\d+ pkt_dts_time:(-?[\d.]+)`)
+
+// VideoKeyframeStart 探测"从 start 定位时,ffmpeg 实际采用的视频起点时间戳(DTS)"。
+//
+// 背景:输出侧 `-ss <start>` 会向前回溯到 <= start 的最近关键帧开始搬运,但输出的
+// 时间戳基线仍按 start 计算,导致产物视频流从一个 >0 的时间点才开始(开头出现
+// "只有音频没有画面"的空档)。关键帧间隔越大空档越长 —— 10 秒 GOP 就是开头 10 秒黑屏,
+// 手机/系统播放器会直接判定文件损坏。调用方据此用 -itsoffset 把这段差值补偿掉。
+//
+// ffmpeg-trim 没有 ffprobe,这里用 `-debug_ts` 读首个视频包的 demuxer DTS:
+//
+//	ffmpeg -ss <start> -i <file> -t 0.05 -map 0 -c copy -f null - -debug_ts
+//
+// 返回 (实际视频起点 DTS, 是否存在视频流, error)。
+// 无视频流(如纯音频)时返回 ok=false 且 err=nil,调用方应跳过补偿。
+func (r *Runner) VideoKeyframeStart(ctx context.Context, path string, start time.Duration) (time.Duration, bool, error) {
+	// 起点为 0 时不会发生回溯,无需探测。
+	if start <= 0 {
+		return 0, true, nil
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return 0, false, err
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// -t 0.05:只需读到第一个视频包;-f null -:不产出真实文件。
+	// -debug_ts 会把每个包的时间戳打到 stderr。注意 -map 0/-c copy 保持与真实裁剪一致,
+	// 否则 ffmpeg 选流策略可能不同,探测到的起点与裁剪时不一致。
+	cmd := exec.CommandContext(cctx, r.Path,
+		"-hide_banner", "-nostdin",
+		"-ss", formatSeconds(start),
+		"-i", abs,
+		"-t", "0.05",
+		"-map", "0",
+		"-c", "copy",
+		"-f", "null", "-",
+		"-debug_ts",
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	cmd.Stdout = nil
+
+	// 退出码可能非 0(如部分容器写 null 时的告警),只要 stderr 里有可用行就算成功。
+	_ = cmd.Run()
+	out := stderr.String()
+
+	if r.Verbose {
+		fmt.Fprintf(os.Stderr, "--- ffmpeg -debug_ts (keyframe probe) %s @ %s ---\n%s\n", abs, formatSeconds(start), out)
+	}
+
+	m := reDebugTSVideo.FindStringSubmatch(out)
+	if m == nil {
+		// 没有视频包:可能是纯音频,也可能是探测失败。交由调用方决定如何处理。
+		return 0, false, nil
+	}
+	sec, perr := strconv.ParseFloat(m[1], 64)
+	if perr != nil {
+		return 0, false, fmt.Errorf("解析关键帧时间戳失败 %q: %w", m[1], perr)
+	}
+	if sec < 0 {
+		sec = 0
+	}
+	return time.Duration(sec * float64(time.Second)), true, nil
+}
+
+// formatSeconds 把时长格式化成 ffmpeg 接受的高精度秒数(与 trim 包保持一致的格式)。
+func formatSeconds(d time.Duration) string {
+	return fmt.Sprintf("%.3f", d.Seconds())
+}
+
 // PrintSummary 生成人类可读的探测摘要。
 func (p *ProbeResult) PrintSummary() string {
 	var b strings.Builder

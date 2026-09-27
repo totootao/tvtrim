@@ -53,9 +53,17 @@ type Plan struct {
 	OutLength time.Duration
 	Head      time.Duration
 	Tail      time.Duration
-	Probe     *ffmpeg.ProbeResult
-	Skip      bool   // true 表示该文件被跳过(时长不足等)
-	SkipWhy   string // 跳过原因
+	// TSOffset 是裁剪时需要补偿的时间戳偏移。
+	//
+	// 输出侧 `-ss <Start>` 会向前回溯到 <= Start 的最近关键帧,但输出的时间戳基线
+	// 仍按 Start 计算,导致产物视频流从一个 >0 的时间点才开始(开头出现"只有音频
+	// 没有画面"的空档)。关键帧间隔越大空档越长 —— 10 秒 GOP 就是开头 10 秒黑屏,
+	// 手机/系统播放器会判定文件损坏。这里记录 (Start - 实际关键帧) 的差值,
+	// buildArgs 用 -itsoffset 把它补偿掉。
+	TSOffset time.Duration
+	Probe    *ffmpeg.ProbeResult
+	Skip     bool   // true 表示该文件被跳过(时长不足等)
+	SkipWhy  string // 跳过原因
 }
 
 // WindowSeconds 返回传给 ffmpeg 的 (start, end) 秒数。
@@ -202,6 +210,18 @@ func (e *Executor) Run(ctx context.Context, plan *Plan) (string, error) {
 		}()
 	}
 
+	// 计算时间戳补偿量:输出侧 -ss 会回溯到最近关键帧,产物视频流会因此从一个
+	// >0 的时间点才开始(开头"没有画面的空档"),手机/系统播放器会判定文件损坏。
+	// 探测出实际采用的关键帧位置,用 (Start - 实际起点) 作为 -itsoffset 的补偿量。
+	// 探测失败时退化为 0(保持旧行为),不阻断裁剪。
+	if plan.Start > 0 && plan.TSOffset == 0 && e.FFmpeg != nil {
+		if actual, hasVideo, err := e.FFmpeg.VideoKeyframeStart(ctx, plan.Input, plan.Start); err == nil && hasVideo {
+			if off := plan.Start - actual; off > 0 {
+				plan.TSOffset = off
+			}
+		}
+	}
+
 	args := e.buildArgs(plan, writeTo)
 	cmd := exec.CommandContext(ctx, e.FFmpeg.Path, args...)
 	cmd.Stdin = nil
@@ -252,12 +272,14 @@ func (e *Executor) Run(ctx context.Context, plan *Plan) (string, error) {
 //     ffmpeg-trim 是被裁剪过的构建,把 `-ss` 放在 `-i` 之前会被静默忽略,
 //     结果是片头根本没被砍掉。实测:输入侧 `-ss 5 -i in -to 25` 产出 25s(片头没砍),
 //     而输出侧 `-i in -ss 5 -to 25` 才正确产出 20s。
-//   - 输出侧 `-ss` 会让 ffmpeg 定位到 `-ss` 之前最近的关键帧再开始搬运,
-//     因此输出首帧一定是关键帧 —— 即使源片含 B 帧,也不会出现"开头黑屏/绿屏"。
+//   - 输出侧 `-ss` 会让 ffmpeg 定位到 `-ss` 之前最近的关键帧再开始搬运,因此输出首帧
+//     一定是关键帧。但这会带来一个新问题:输出的时间戳基线仍按 `-ss` 计算,产物视频流
+//     于是从一个 >0 的时间点才开始 —— 开头出现"只有音频没有画面"的空档(关键帧间隔
+//     越大空档越长,10 秒 GOP 就是开头 10 秒黑屏),手机/系统播放器会判定文件损坏。
+//     对策:裁剪前探测实际关键帧位置,用 `-itsoffset`(输入侧)把这段差值补偿掉。
 //   - 用相对时长 `-t`(终点-起点)而非绝对 `-to`:裁剪长度与具体 muxer 无关,
 //     避免 asf/wmv 等容器按关键帧对齐、多保留一个 GOP 导致时长偏长。
 //   - `-avoid_negative_ts make_zero` + `-fflags +genpts`:把输出时间戳归零并重排 PTS。
-//     否则输出流保留源片原始时间戳(如从 90s 起播),部分播放器会黑屏、时长错或无法拖动。
 //   - `-c copy`:原样搬运,不重编码(ffmpeg-trim 本来也没有编码器)。
 //   - `-map 0`:保留所有流(多音轨、字幕轨)。
 func (e *Executor) buildArgs(plan *Plan, output string) []string {
@@ -270,6 +292,13 @@ func (e *Executor) buildArgs(plan *Plan, output string) []string {
 		args = append(args, "-loglevel", "error")
 	}
 
+	// -itsoffset 是"输入侧"选项,必须放在 -i 之前。
+	// 它把输入时间轴整体前移,用来抵消输出侧 -ss 回溯到关键帧造成的偏移:
+	// 不加时产物视频流会从 (Start-关键帧) 开始(开头一段只有音频没画面),
+	// 手机/系统播放器会判定文件损坏。
+	if plan.TSOffset > 0 {
+		args = append(args, "-itsoffset", formatSeconds(plan.TSOffset))
+	}
 	args = append(args, "-i", plan.Input)
 
 	// -ss 放在 -i 之后(输出侧定位)。顺序必须是 ss 在前。

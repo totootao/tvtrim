@@ -16,6 +16,11 @@ import (
 const (
 	EnvMode = "TVTRIM_FAKE_MODE"
 	EnvOut  = "TVTRIM_FAKE_OUT"
+	// EnvKeyDTS 指定假 ffmpeg 在 -debug_ts 模式下报告的首个视频包 DTS(秒)。
+	// 用于验证输出侧 -ss 回溯到关键帧时的时间戳补偿逻辑。
+	EnvKeyDTS = "TVTRIM_FAKE_KEY_DTS"
+	// EnvHasVideo 为 "0" 时让 -debug_ts 模式不输出视频行(模拟纯音频文件)。
+	EnvHasVideo = "TVTRIM_FAKE_HAS_VIDEO"
 )
 
 // Fake 行为的取值。
@@ -45,14 +50,29 @@ force="${TVTRIM_FAKE_MODE}"
 
 silence=0
 trim=0
+debugts=0
 for a in "$@"; do
   case "$a" in
     silencedetect*) silence=1 ;;
     -ss|-to|-f) trim=1 ;;
+    -debug_ts) debugts=1 ;;
   esac
 done
 
 emit() { [ -n "$out" ] && [ -f "$out" ] && cat "$out" >&2; }
+
+# -debug_ts:输出首个视频包的 demuxer 时间戳,供关键帧探测使用。
+# 默认报告 DTS=0.000(相当于 -ss 正好落在关键帧上,无需补偿)。
+if [ "$debugts" = "1" ]; then
+  if [ "${TVTRIM_FAKE_HAS_VIDEO:-1}" = "0" ]; then
+    echo "[vist#0:0/aac @ 0x0] demuxer -> ist_index:0:1 type:audio pkt_pts:0 pkt_pts_time:0.000 pkt_dts:0 pkt_dts_time:0.000" >&2
+    exit 0
+  fi
+  dts="${TVTRIM_FAKE_KEY_DTS:-0.000}"
+  echo "[vist#0:0/hevc @ 0x0] demuxer -> ist_index:0:0 type:video pkt_pts:0 pkt_pts_time:${dts} pkt_dts:0 pkt_dts_time:${dts} duration:3600 duration_time:0.04" >&2
+  echo "[vist#0:0/hevc @ 0x0] demuxer+tsfixup -> ist_index:0:0 type:video pkt_pts:0 pkt_pts_time:0.000 pkt_dts:0 pkt_dts_time:0.000" >&2
+  exit 0
+fi
 
 if [ "$silence" = "1" ]; then
   if [ "$force" = "nosilence" ]; then exit 1; fi

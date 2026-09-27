@@ -207,3 +207,83 @@ func TestClearCache(t *testing.T) {
 		t.Fatalf("WriteFile 异常: %v", err)
 	}
 }
+
+// TestVideoKeyframeStart 验证关键帧起点探测:
+//   - 正常读到首个视频包的 DTS
+//   - 纯音频文件返回 hasVideo=false 且不报错
+//   - start<=0 时直接返回 0,不调用 ffmpeg
+func TestVideoKeyframeStart(t *testing.T) {
+	dir := t.TempDir()
+	fake := testkit.WriteFakeFFmpeg(t, dir)
+	file := testkit.WriteFile(t, dir, "x.mp4", "data")
+	r := &Runner{Path: fake}
+
+	t.Run("读取首个视频包 DTS", func(t *testing.T) {
+		testkit.SetEnv(t, testkit.EnvKeyDTS, "79.966")
+		got, hasVideo, err := r.VideoKeyframeStart(context.Background(), file, 90*time.Second)
+		if err != nil {
+			t.Fatalf("不应报错: %v", err)
+		}
+		if !hasVideo {
+			t.Fatal("应探测到视频流")
+		}
+		if want := 79966 * time.Millisecond; got != want {
+			t.Errorf("DTS = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("纯音频无视频流", func(t *testing.T) {
+		testkit.SetEnv(t, testkit.EnvHasVideo, "0")
+		got, hasVideo, err := r.VideoKeyframeStart(context.Background(), file, 90*time.Second)
+		if err != nil {
+			t.Fatalf("无视频流不应报错: %v", err)
+		}
+		if hasVideo {
+			t.Error("纯音频不应报告有视频流")
+		}
+		if got != 0 {
+			t.Errorf("无视频流时起点应为 0,实际 %v", got)
+		}
+	})
+
+	t.Run("start 为 0 时不探测", func(t *testing.T) {
+		// 把 Runner 指向一个不存在的路径:若仍去调用必然会报错,
+		// 从而证明 start<=0 时直接短路返回。
+		bad := &Runner{Path: filepath.Join(dir, "no-such-ffmpeg")}
+		got, hasVideo, err := bad.VideoKeyframeStart(context.Background(), file, 0)
+		if err != nil {
+			t.Fatalf("start=0 应短路返回,不应报错: %v", err)
+		}
+		if !hasVideo || got != 0 {
+			t.Errorf("start=0 应返回 (0,true),实际 (%v,%v)", got, hasVideo)
+		}
+	})
+
+	t.Run("负 DTS 夹到 0", func(t *testing.T) {
+		testkit.SetEnv(t, testkit.EnvKeyDTS, "-1.500")
+		got, hasVideo, err := r.VideoKeyframeStart(context.Background(), file, 90*time.Second)
+		if err != nil {
+			t.Fatalf("不应报错: %v", err)
+		}
+		if !hasVideo || got != 0 {
+			t.Errorf("负 DTS 应夹到 0,实际 (%v,%v)", got, hasVideo)
+		}
+	})
+}
+
+// TestVideoKeyframeStartUnparsable 探测不到视频行时应返回 hasVideo=false,
+// 让调用方降级为"不补偿",而不是把裁剪整个搞失败。
+func TestVideoKeyframeStartUnparsable(t *testing.T) {
+	dir := t.TempDir()
+	// 指向一个不存在的可执行文件:子进程起不来,stderr 为空 → 解析不到视频行。
+	r := &Runner{Path: filepath.Join(dir, "no-such-ffmpeg")}
+	file := testkit.WriteFile(t, dir, "x.mp4", "data")
+
+	_, hasVideo, err := r.VideoKeyframeStart(context.Background(), file, 90*time.Second)
+	if err != nil {
+		t.Fatalf("探测失败不应返回错误(应降级): %v", err)
+	}
+	if hasVideo {
+		t.Error("无输出时不应报告有视频流")
+	}
+}
