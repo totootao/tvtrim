@@ -32,7 +32,7 @@ import (
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.5.0"
+var version = "1.5.1"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 
@@ -190,8 +190,8 @@ func run(argv []string) error {
 	if err != nil {
 		return fmt.Errorf("-min 参数无效: %w", err)
 	}
-	// -web 可以与 -auto(页面展示识别结果)或 -head/-tail(页面可微调)组合,
-	// 但二者不能同时给;单独 -web 也无意义。
+	// -web 可以与 -auto(页面展示识别结果)或 -head/-tail(页面预填头尾)组合,
+	// 但二者不能同时给。单独 -web 也支持:页面列出全部文件,用户手动填切点。
 	if o.web && o.auto && (head != 0 || tail != 0) {
 		return fmt.Errorf("-web 模式下请二选一:-auto 自动识别,或用 -head/-tail 手动指定")
 	}
@@ -200,9 +200,6 @@ func run(argv []string) error {
 	}
 	if head == 0 && tail == 0 && !o.auto && !o.web {
 		return fmt.Errorf("请至少指定 -head 或 -tail 中的一个,或使用 -auto / -web")
-	}
-	if o.web && head == 0 && tail == 0 && !o.auto {
-		return fmt.Errorf("-web 需要配合 -auto 或 -head/-tail:页面上至少要有一个默认切点")
 	}
 	if head < 0 || tail < 0 || keep < 0 {
 		return fmt.Errorf("时长不能为负数")

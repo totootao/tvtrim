@@ -152,15 +152,15 @@ function render(){
           const out = Math.max(0, (it.duration||0) - (+val(it.path,'head')) - (+val(it.path,'tail')));
           return `<tr class="${it.ready?'':'off'}">
             <td><input type="checkbox" data-show="${esc(sh.id)}" data-path="${esc(it.path)}"
-                 ${it.ready?'checked':'disabled'} ${s.status==='done'?'disabled':''}></td>
+                 ${it.locked?'disabled':''} ${it.ready?'checked':''} ${s.status==='done'?'disabled':''}></td>
             <td>${it.episode? 'EP'+String(it.episode).padStart(2,'0') : '-'}</td>
             <td title="${esc(it.path)}">${esc(it.name)}</td>
             <td class="num">${fmtDur(it.duration)}</td>
             <td class="num">${fmtSize(it.size)}</td>
             <td class="num"><input type="number" step="0.1" min="0" id="h:${esc(it.path)}" value="${fmtNum(it.head)}"
-                 ${it.ready?'':'disabled'} oninput="tick(this)"></td>
+                 ${it.locked?'disabled':''} oninput="tick(this)"></td>
             <td class="num"><input type="number" step="0.1" min="0" id="t:${esc(it.path)}" value="${fmtNum(it.tail)}"
-                 ${it.ready?'':'disabled'} oninput="tick(this)"></td>
+                 ${it.locked?'disabled':''} oninput="tick(this)"></td>
             <td class="num" id="o:${esc(it.path)}">${fmtDur(out)}</td>
             <td class="st-${s.status||'pending'}">
               <span class="dot d-${s.status||'pending'}"></span>${statusText(s, it)}
@@ -219,7 +219,11 @@ function checkedItems(){
 }
 function itemsOfShow(id){
   const sh = state.shows.find(s=>s.id===id); if(!sh) return [];
-  return sh.items.filter(it=>it.ready).map(it=>({path:it.path, head:val(it.path,'head'), tail:val(it.path,'tail')}));
+  // 收集该剧所有未锁定项;读取输入框实时值,没填切点的(head==tail==0)跳过。
+  // 这样纯手动模式下只有用户实际填了切点的集才会被执行。
+  return sh.items.filter(it=>!it.locked).map(it=>({
+    path:it.path, head:val(it.path,'head'), tail:val(it.path,'tail')
+  })).filter(x=>x.head>0||x.tail>0);
 }
 
 function updateFooter(){

@@ -27,9 +27,12 @@ type Item struct {
 	// Head/Tail 是建议砍掉的头尾秒数(-auto 识别结果或用户手动时长)。
 	Head float64 `json:"head"`
 	Tail float64 `json:"tail"`
-	// Ready 为 false 表示切点不可用(识别失败),不能参与执行。
-	Ready bool   `json:"ready"`
-	Note  string `json:"note"`
+	// Ready 为 true 表示已有默认切点(可参与"全选/按剧执行")。
+	// 纯手动模式(head/tail 都为 0)下为 false,但依然可编辑。
+	Ready bool `json:"ready"`
+	// Locked 为 true 表示该项禁止用户编辑/勾选(仅识别失败的项),没有切点可裁。
+	Locked bool   `json:"locked"`
+	Note   string `json:"note"`
 }
 
 // Show 表示一部剧(或一个季)下的多集。
@@ -92,6 +95,7 @@ func BuildShows(items []scan.Item, probes map[string]*ffmpeg.ProbeResult,
 			Head:    headSec,
 			Tail:    tailSec,
 			Ready:   headSec > 0 || tailSec > 0,
+			Locked:  false,
 			Note:    "手动指定",
 		}
 		if p, ok := probes[it.Path]; ok && p != nil {
@@ -105,6 +109,8 @@ func BuildShows(items []scan.Item, probes map[string]*ffmpeg.ProbeResult,
 				if r.OK {
 					item.Note = r.Note
 				} else {
+					// 识别失败的项没有切点可裁,锁定不让用户勾选。
+					item.Locked = true
 					item.Note = "识别失败:" + r.Note
 				}
 			} else {

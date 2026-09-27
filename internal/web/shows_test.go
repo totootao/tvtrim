@@ -356,3 +356,51 @@ func TestTotalSize(t *testing.T) {
 		t.Errorf("totalSize = %d, 期望 60", got)
 	}
 }
+
+// Locked 区分"禁止编辑"(识别失败)与"可编辑"(手动或识别成功)。
+// 这是纯手动 Web 模式能用的前提:页面必须允许用户在 head/tail 为 0 的项上手动填值。
+func TestBuildShowsLockSemantics(t *testing.T) {
+	dir := "/media/lock"
+	pOK := filepath.Join(dir, "ok.mkv")
+	pFail := filepath.Join(dir, "fail.mkv")
+	pManual := filepath.Join(dir, "manual.mkv")
+
+	// 纯手动模式:res 为 nil,head/tail 都为 0——页面上这些项要可编辑,不能锁定。
+	shows := BuildShows([]scan.Item{itemOf(dir, "manual.mkv", 1, 1, 1)},
+		map[string]*ffmpeg.ProbeResult{pManual: probeOf(1200)}, nil, 0, 0)
+	it := shows[0].Items[0]
+	if it.Locked {
+		t.Error("纯手动模式的项不应被锁定(否则页面无法编辑)")
+	}
+	if it.Ready {
+		t.Error("无默认切点的纯手动项 Ready 应为 false")
+	}
+
+	// 手动模式带统一 head/tail:可编辑且 Ready。
+	shows = BuildShows([]scan.Item{itemOf(dir, "manual.mkv", 1, 1, 1)},
+		map[string]*ffmpeg.ProbeResult{pManual: probeOf(1200)}, nil, 30, 45)
+	it = shows[0].Items[0]
+	if it.Locked || !it.Ready {
+		t.Errorf("手动+head/tail: Locked=%v Ready=%v, 期望 false/true", it.Locked, it.Ready)
+	}
+
+	// 自动识别:成功项可编辑,失败项锁定。
+	res := map[string]auto.Result{
+		pOK:   {Head: 21.5, Tail: 19.99, OK: true, Note: "自动识别"},
+		pFail: {OK: false, Note: "片尾静音不足"},
+	}
+	shows = BuildShows([]scan.Item{
+		itemOf(dir, "ok.mkv", 1, 1, 1),
+		itemOf(dir, "fail.mkv", 1, 1, 2),
+	}, map[string]*ffmpeg.ProbeResult{pOK: probeOf(1200), pFail: probeOf(1200)}, res, 0, 0)
+	ok, fail := shows[0].Items[0], shows[0].Items[1]
+	if ok.Locked || !ok.Ready {
+		t.Errorf("识别成功项: Locked=%v Ready=%v, 期望 false/true", ok.Locked, ok.Ready)
+	}
+	if !fail.Locked || fail.Ready {
+		t.Errorf("识别失败项: Locked=%v Ready=%v, 期望 true/false", fail.Locked, fail.Ready)
+	}
+	if !strings.HasPrefix(fail.Note, "识别失败:") {
+		t.Errorf("失败项 Note 应带前缀,实际 %q", fail.Note)
+	}
+}

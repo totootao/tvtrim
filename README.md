@@ -7,7 +7,7 @@
 ```console
 $ tvtrim -auto -dry-run ./某剧第一季/
 
-tvtrim 1.5.0
+tvtrim 1.5.1
   模式    : 自动识别片头/片尾(静音检测)
   ffmpeg  : /root/.cache/tvtrim/ffmpeg-linux-amd64
   待处理  : 24 个文件 / 1 部剧
@@ -92,7 +92,7 @@ docker run --rm -p 8080:8080 --user "$(id -u):$(id -g)" -v "$PWD/某剧":/media 
 |---|---|
 | `totootao/tvtrim:latest` | main 分支最新构建 |
 | `totootao/tvtrim:main` | 同上(buildx 分支标签) |
-| `totootao/tvtrim:1.5` / `:1.5.0` | 对应 `v*` tag 发布的版本 |
+| `totootao/tvtrim:1.5` / `:1.5.1` | 对应 `v*` tag 发布的版本 |
 
 ## 用法
 
@@ -398,6 +398,7 @@ tvtrim 支持三种常见布局,都会**自动拆成不同的剧**分别处理:
 ```sh
 tvtrim -web -auto -r ./某剧全集/          # 自动识别 → 页面确认
 tvtrim -web -head 90 -tail 60 ./某剧.S01/ # 手动时长 → 页面微调后确认
+tvtrim -web ./某剧全集/                   # 纯手动:页面列出全部文件,逐集填切点
 tvtrim -web -auto -addr 0.0.0.0:8080 ./某剧/  # 指定监听地址(注意安全)
 ```
 
@@ -407,7 +408,7 @@ tvtrim -web -auto -addr 0.0.0.0:8080 ./某剧/  # 指定监听地址(注意安�
 启动后会打印本地地址并尝试自动打开浏览器(`-no-open` 可关掉,容器内自动不尝试):
 
 ```console
-tvtrim 1.5.0
+tvtrim 1.5.1
   待处理  : 7 个文件 / 2 部剧
   正在自动识别切点(7 个文件)…
   识别完成: 7 成功
@@ -425,6 +426,10 @@ tvtrim 1.5.0
 - **退出**:页面上的"退出"按钮与终端 Ctrl+C 都能优雅关闭服务
 
 识别失败的集在页面上**不可勾选**,必须先手动给它填 head/tail。
+
+纯手动模式(`-web` 不带 `-auto`/`-head/-tail`)：页面列出全部文件,head/tail 初始为 0,
+**所有项均可编辑**——逐集填入切点并勾选即可执行;没填(仍为 0)的集不会被「确认执行本剧」
+带进去。适合你已经量好每集该砍多少秒、或只想先浏览一遍文件清单的场景。
 
 界面是单个 `embed` 进二进制的 HTML 文件,没有任何外部资源请求,离线可用。
 

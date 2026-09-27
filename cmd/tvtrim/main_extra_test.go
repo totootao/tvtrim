@@ -90,7 +90,6 @@ func TestRunArgumentValidation(t *testing.T) {
 		{"auto 与手动时长冲突", []string{"-auto", "-head", "90", file}, "-auto 与 -head/-tail 不能同时使用"},
 		{"web 下 auto 与手动时长冲突", []string{"-web", "-auto", "-head", "90", file}, "-web 模式下请二选一"},
 		{"缺少切点", []string{file}, "请至少指定 -head 或 -tail"},
-		{"web 缺少切点", []string{"-web", file}, "-web 需要配合 -auto 或 -head/-tail"},
 		{"-o 与 -inplace 冲突", []string{"-head", "10", "-o", "x.mkv", "-inplace", file}, "-o 与 -inplace 不能同时使用"},
 		{"-o 多文件", []string{"-head", "10", "-o", "x.mkv", file, ff}, "-o 只能在处理单个文件时使用"},
 		{"ffmpeg 不可用", []string{"-head", "10", "-ffmpeg", filepath.Join(dir, "nope"), file}, "--ffmpeg 指定的文件不可用"},
