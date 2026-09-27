@@ -13,6 +13,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/totootao/tvtrim/internal/auto"
+	"github.com/totootao/tvtrim/internal/dcache"
 	"github.com/totootao/tvtrim/internal/ffmpeg"
 	"github.com/totootao/tvtrim/internal/scan"
 	"github.com/totootao/tvtrim/internal/trim"
@@ -30,7 +32,7 @@ import (
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.4.3"
+var version = "1.5.0"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 
@@ -120,6 +122,9 @@ type cliOptions struct {
 	web        bool
 	addr       string
 	noOpen     bool
+	cacheFile  string
+	noCache    bool
+	refresh    bool
 }
 
 func run(argv []string) error {
@@ -148,6 +153,9 @@ func run(argv []string) error {
 	fs.BoolVar(&o.noDownload, "no-download", false, "禁止自动下载 ffmpeg-trim")
 	fs.BoolVar(&o.verbose, "v", false, "输出详细信息")
 	fs.BoolVar(&o.noOpen, "no-open", false, "-web 时不尝试自动打开浏览器")
+	fs.StringVar(&o.cacheFile, "cache-file", "", "-auto 识别结果的缓存文件(默认:容器内放媒体目录,宿机放 ~/.cache)")
+	fs.BoolVar(&o.noCache, "no-cache", false, "不读写识别缓存(每次都重新识别)")
+	fs.BoolVar(&o.refresh, "refresh", false, "忽略已有缓存,全部重新识别后覆盖写回")
 	fs.BoolVar(&o.showVer, "version", false, "显示版本")
 
 	if err := fs.Parse(argv); err != nil {
@@ -278,14 +286,14 @@ func run(argv []string) error {
 
 	// Web 界面优先于 dry-run/自动识别分支:先出给人看,再等人工确认。
 	if o.web {
-		return runWeb(ctx, runner, items, o, trimOpts, head, tail)
+		return runWeb(ctx, runner, items, o, trimOpts, head, tail, inputs)
 	}
 
 	// 自动识别优先于普通 dry-run:runAuto 内部自己处理 dry-run,
 	// 既要打印识别结果表,也要打印裁剪计划(否则 -auto -dry-run 会因为
 	// 还没算切点而把所有文件标成"未指定头尾时长")。
 	if o.auto {
-		return runAuto(ctx, runner, items, o, trimOpts)
+		return runAuto(ctx, runner, items, o, trimOpts, inputs)
 	}
 
 	// dry-run 走单独路径:探测 + 展示计划,不执行。
@@ -315,10 +323,20 @@ func run(argv []string) error {
 //	阶段一 并发探测 + 静音检测 + 多集众数纠错(detectAll)
 //	阶段二 展示识别结果
 //	阶段三 按每集切点进入常规批量裁剪
-func runAuto(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, o cliOptions, trimOpts trim.Options) error {
-	results := detectAll(ctx, runner, items, detectConfig{
-		Mode: DetectSilence, Workers: o.workers, Sample: o.sample, Out: os.Stdout,
+func runAuto(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, o cliOptions,
+	trimOpts trim.Options, inputs []string) error {
+
+	cache, cachePath := openDetectCache(o, inputs, dcache.Params{
+		NoiseDB: auto.NoiseDB, MinSilence: auto.MinSilence, Sample: o.sample,
+	}.Signature())
+	results, stat := detectAllWithStat(ctx, runner, items, detectConfig{
+		Mode: DetectSilence, Workers: o.workers, Sample: o.sample, Out: os.Stdout, Cache: cache,
 	})
+	if line := cacheInfoLine(cachePath, stat, len(items)); line != "" {
+		fmt.Println(line)
+	}
+	// 缓存写入放在展示之前:这一步只影响下次运行,失败了也不该打断本次。
+	saveDetectCache(cache, cachePath, results)
 
 	// 阶段二:展示识别结果。
 	runItems := runnableItems(results)
@@ -394,7 +412,7 @@ func showNameOf(it scan.Item) string {
 // 扫描/识别完成后把结果推给页面,由人工按剧勾选确认后再真正执行裁剪。
 // 阻塞直到用户 Ctrl+C 或在页面上点击退出。
 func runWeb(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
-	o cliOptions, trimOpts trim.Options, head, tail time.Duration) error {
+	o cliOptions, trimOpts trim.Options, head, tail time.Duration, inputs []string) error {
 
 	mode, detectMode := web.ModeManual, DetectProbeOnly
 	if o.auto {
@@ -405,9 +423,22 @@ func runWeb(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
 	if o.auto && o.sample > 0 {
 		fmt.Printf("  (每部剧抽样 %d 集检测,其余沿用本剧结论)\n", o.sample)
 	}
-	results := detectAll(ctx, runner, items, detectConfig{
-		Mode: detectMode, Workers: o.workers, Sample: o.sample, Out: os.Stdout,
+
+	// Web 同样吃缓存:页面上看到的就是上次的结论,新增的集才会去识别。
+	var cache *dcache.Store
+	var cachePath string
+	if o.auto {
+		cache, cachePath = openDetectCache(o, inputs, dcache.Params{
+			NoiseDB: auto.NoiseDB, MinSilence: auto.MinSilence, Sample: o.sample,
+		}.Signature())
+	}
+	results, stat := detectAllWithStat(ctx, runner, items, detectConfig{
+		Mode: detectMode, Workers: o.workers, Sample: o.sample, Out: os.Stdout, Cache: cache,
 	})
+	if line := cacheInfoLine(cachePath, stat, len(items)); line != "" {
+		fmt.Println(line)
+	}
+	saveDetectCache(cache, cachePath, results)
 
 	probes := make(map[string]*ffmpeg.ProbeResult, len(results))
 	detects := make(map[string]auto.Result, len(results))
@@ -439,7 +470,7 @@ func runWeb(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
 		return fmt.Errorf("启动 Web 服务失败: %w", err)
 	}
 	actual := ln.Addr().String()
-	url := fmt.Sprintf("http://%s/", actual)
+	url := webURL(actual)
 	fmt.Printf("  Web 界面: %s\n", url)
 	// 监听地址是通配地址(容器里的默认值)时,提示容器外怎么访问。
 	if hint := externalURLHint(actual); hint != "" {
@@ -452,6 +483,22 @@ func runWeb(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
 		go tryOpenBrowser(url)
 	}
 	return srv.Serve(ctx, ln)
+}
+
+// webURL 把监听地址拼成给人看的 URL。
+//
+// 通配地址(0.0.0.0 / ::)一律显示成 localhost —— 直接把 [::]:8080 丢给用户
+// 既看不懂也点不开。
+func webURL(actual string) string {
+	host, port, err := net.SplitHostPort(actual)
+	if err != nil {
+		return "http://" + actual + "/"
+	}
+	switch host {
+	case "0.0.0.0", "::":
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/"
 }
 
 // tryOpenBrowser 尽力打开系统浏览器,失败无所谓(用户可手动访问)。

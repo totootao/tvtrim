@@ -25,6 +25,9 @@ const (
 	ModeCopy    = "copy"    // 创建输出文件(模拟 stream copy 成功)
 	ModeFail    = "fail"    // 输出错误并以退出码 1 结束
 	ModeEmpty   = "empty"   // 创建小于 1KB 的空输出文件(触发空输出检测)
+	// ModeNoSilence 让探测正常、但静音检测失败(退出 1 且无输出)。
+	// 用于区分"结论来自缓存"与"结论来自本次检测":命中缓存的文件照样有结论。
+	ModeNoSilence = "nosilence"
 )
 
 // FakeScript 是假 ffmpeg 的实现。
@@ -34,7 +37,8 @@ const (
 //   - 含 `-ss`/`-to`/`-c copy` → 写出输出文件(>1KB,避免被空输出检测拦下),退出 0
 //   - 其余(通常是 `ffmpeg -i x`) → 输出 TVTRIM_FAKE_OUT 指向的文本,退出 1
 //
-// TVTRIM_FAKE_MODE 为 empty/fail 时覆盖写文件行为,用于验证异常分支。
+// TVTRIM_FAKE_MODE 为 empty/fail 时覆盖写文件行为,用于验证异常分支;
+// 为 nosilence 时静音检测直接失败,用于验证"沿用缓存"这条路径。
 const FakeScript = `#!/usr/bin/env bash
 out="${TVTRIM_FAKE_OUT}"
 force="${TVTRIM_FAKE_MODE}"
@@ -50,7 +54,11 @@ done
 
 emit() { [ -n "$out" ] && [ -f "$out" ] && cat "$out" >&2; }
 
-if [ "$silence" = "1" ]; then emit; exit 0; fi
+if [ "$silence" = "1" ]; then
+  if [ "$force" = "nosilence" ]; then exit 1; fi
+  emit
+  exit 0
+fi
 
 if [ "$trim" = "1" ]; then
   dst="${!#}"

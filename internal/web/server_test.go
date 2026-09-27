@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -453,4 +454,44 @@ func TestServeStopsOnShutdownAPI(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve 未在 5s 内退出")
 	}
+}
+
+// TestListenWildcardUsesIPv4 监听 0.0.0.0 时必须拿到 IPv4 socket。
+// Go 默认会把它建成 IPv6 双栈(netstat 显示 :::port),在禁用 IPv6 的环境里
+// docker -p 转发过来的 IPv4 连接会落空,表现为"容器在跑但连不上"。
+func TestListenWildcardUsesIPv4(t *testing.T) {
+	ln, err := (&Server{}).Listen("0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	defer ln.Close()
+
+	host, _, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("解析监听地址失败: %v", err)
+	}
+	if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+		t.Errorf("应监听 IPv4 地址, 实际 %q", ln.Addr())
+	}
+}
+
+// TestListenLoopbackStillWorks 回环地址的行为不变(端口 0 由系统分配)。
+func TestListenLoopbackStillWorks(t *testing.T) {
+	ln, err := (&Server{}).Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	defer ln.Close()
+	if !strings.HasPrefix(ln.Addr().String(), "127.0.0.1:") {
+		t.Errorf("回环监听地址 = %q", ln.Addr())
+	}
+}
+
+// TestListenPortOnly 只给端口号时补成 host:port,不该报错。
+func TestListenPortOnly(t *testing.T) {
+	ln, err := (&Server{}).Listen("0")
+	if err != nil {
+		t.Fatalf("只给端口也应能监听: %v", err)
+	}
+	ln.Close()
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/totootao/tvtrim/internal/auto"
+	"github.com/totootao/tvtrim/internal/dcache"
 	"github.com/totootao/tvtrim/internal/ffmpeg"
 	"github.com/totootao/tvtrim/internal/scan"
 	"github.com/totootao/tvtrim/internal/trim"
@@ -56,6 +57,17 @@ type detectConfig struct {
 	Sample int
 	// Out 是进度输出目标,nil 表示不显示进度。
 	Out io.Writer
+	// Cache 非空时先从中取已有结论,命中缓存的文件不再做静音检测。
+	// 只有 DetectSilence 模式用得到它。
+	Cache *dcache.Store
+}
+
+// detectStat 是 detectAll 的来源统计,用于向用户说明这次到底识别了什么。
+type detectStat struct {
+	// FromCache 是沿用上次结论的文件数。
+	FromCache int
+	// Detected 是本次真正做了静音检测的文件数。
+	Detected int
 }
 
 // detectAll 返回按文件路径排序的结果,流程分三步:
@@ -65,9 +77,20 @@ type detectConfig struct {
 //	步骤三 众数纠错 → 把每部剧的切点推广到未抽样的集
 //
 // Mode 为 DetectProbeOnly 时只做步骤一。
+//
+// cfg.Cache 非空时,已记录过的文件直接沿用上次结论,只识别新增/变更的文件。
 func detectAll(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, cfg detectConfig) []detectResult {
+	ordered, _ := detectAllWithStat(ctx, runner, items, cfg)
+	return ordered
+}
+
+// detectAllWithStat 在 detectAll 的基础上额外返回结论来源统计。
+func detectAllWithStat(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
+	cfg detectConfig) ([]detectResult, detectStat) {
+
+	var stat detectStat
 	if len(items) == 0 {
-		return nil
+		return nil, stat
 	}
 	workers := effectiveWorkers(cfg.Workers, len(items))
 
@@ -79,29 +102,57 @@ func detectAll(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, cf
 			out = append(out, detectResult{Item: it, Probe: probes[it.Path]})
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Item.Path < out[j].Item.Path })
-		return out
+		return out, stat
 	}
 
-	// 步骤二:只抽样一部分做静音检测。
-	targets := pickSilenceTargets(items, cfg.Sample)
-	res := silenceDetect(ctx, runner, items, probes, workers, cfg.Out, targets)
+	// 步骤一·五:先把缓存里已有的结论挑出来,剩下的才需要真正解码。
+	cached := map[string]auto.Result{}
+	pending := items
+	if cfg.Cache != nil {
+		pending = nil
+		for _, it := range items {
+			if e, ok := cfg.Cache.Lookup(it.Path, it.Size); ok {
+				cached[it.Path] = auto.Result{
+					OK:   true,
+					Head: e.Head,
+					Tail: e.Tail,
+					Note: dcache.NotePrefix + dcache.CleanNote(e.Note),
+				}
+				continue
+			}
+			pending = append(pending, it)
+		}
+		stat.FromCache = len(cached)
+	}
+
+	// 步骤二:只对未命中缓存的文件做抽样静音检测。
+	targets := pickSilenceTargets(pending, cfg.Sample)
+	res := silenceDetect(ctx, runner, pending, probes, workers, cfg.Out, targets)
+	stat.Detected = len(targets)
 
 	// 抽样集互相矛盾时该剧结论不可信,退回整部剧重测。
 	// sample<=1 时没有第二个样本可比,重测也没意义,尊重用户的显式选择。
-	if extra := expandInconsistentGroups(items, res, cfg.Sample); extra != nil {
+	//
+	// 共识判断把缓存里的结论也计入 —— 有缓存的剧本来就有多数派,不会因为
+	// 新来一集就白白把整部剧重测一遍。真的没共识时,重测范围也只限于本次
+	// 未命中缓存的文件:缓存里的结论当初就是实测出来的,没必要再解码一次。
+	if extra := expandInconsistentGroups(items, pending, mergeResults(res, cached), cfg.Sample); extra != nil {
 		fprintln(cfg.Out, fmt.Sprintf(
 			"抽样集结论不一致,改用全部 %d 集重新判定(可用 -sample 关闭抽样)", len(extra)))
-		for path, r := range silenceDetect(ctx, runner, items, probes, workers, cfg.Out, extra) {
+		for path, r := range silenceDetect(ctx, runner, pending, probes, workers, cfg.Out, extra) {
 			res[path] = r
 		}
+		stat.Detected = len(extra)
 	}
 
 	// 组装成按路径排序的结果切片(后续按剧团购分组,需要稳定顺序)。
 	ordered := make([]detectResult, 0, len(items))
 	for _, it := range items {
 		d := detectResult{Item: it, Probe: probes[it.Path]}
-		if r, ok := res[it.Path]; ok {
+		if r, ok := res[it.Path]; ok && r.OK {
 			d.Res = r
+		} else {
+			d.Res = cached[it.Path]
 		}
 		ordered = append(ordered, d)
 	}
@@ -111,7 +162,19 @@ func detectAll(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, cf
 	applyModeCorrection(ordered)
 	broadcastShowValues(ordered)
 	refreshAgreementNotes(ordered)
-	return ordered
+	return ordered, stat
+}
+
+// mergeResults 合并两份结论,later 覆盖 former。
+func mergeResults(former, later map[string]auto.Result) map[string]auto.Result {
+	out := make(map[string]auto.Result, len(former)+len(later))
+	for p, r := range former {
+		out[p] = r
+	}
+	for p, r := range later {
+		out[p] = r
+	}
+	return out
 }
 
 // probeAll 并发探测每个文件的元数据;失败的文件不在返回的 map 里。
@@ -274,25 +337,34 @@ func lessEpisode(a, b scan.Item) bool {
 	return a.Path < b.Path
 }
 
-// expandInconsistentGroups 找出抽样后仍未形成共识的剧,返回其全部文件的集合。
+// expandInconsistentGroups 找出抽样后仍未形成共识的剧,返回需要重测的文件集合。
 //
-// "未形成共识"= 该剧抽样成功的结果里没有任何两集一致。这种情况下众数不成立,
-// 抽样结论不可信,于是整部剧重测(而不是悄悄把某个值套给全剧)。
-// 所有剧都有共识时返回 nil。
-func expandInconsistentGroups(items []scan.Item, res map[string]auto.Result, sample int) map[string]bool {
+// "未形成共识"= 该剧已有结果里没有任何两集一致。这种情况下众数不成立,
+// 抽样结论不可信,于是重测(而不是悄悄把某个值套给全剧)。
+//
+// items 用于分组与共识判断(含缓存命中的文件,让"老剧 + 新增一集"不必重测);
+// scope 限定重测范围(通常是不含缓存命中的文件)。所有剧都有共识时返回 nil。
+func expandInconsistentGroups(items, scope []scan.Item, res map[string]auto.Result, sample int) map[string]bool {
 	// sample<=1 时无从比较:单个样本的结论就是结论,不再要求多数派。
 	if sample <= 1 {
 		return nil
+	}
+	inScope := make(map[string]bool, len(scope))
+	for _, it := range scope {
+		inScope[it.Path] = true
 	}
 	var extra map[string]bool
 	for _, g := range groupByShow(items) {
 		if hasConsensus(res, g.items) {
 			continue
 		}
-		if extra == nil {
-			extra = make(map[string]bool, len(items))
-		}
 		for _, it := range g.items {
+			if !inScope[it.Path] {
+				continue
+			}
+			if extra == nil {
+				extra = make(map[string]bool, len(scope))
+			}
 			extra[it.Path] = true
 		}
 	}

@@ -150,3 +150,45 @@ func TestLooksContainerIgnoresUnknownEnvValue(t *testing.T) {
 		t.Error("无法识别的环境变量值应忽略,而非判定为容器")
 	}
 }
+
+// TestWebURLHidesWildcard 监听在通配地址时要显示成 localhost,
+// 别把 [::]:8080 这种地址直接丢给用户(看不懂,也点不开)。
+func TestWebURLHidesWildcard(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"0.0.0.0:8080", "http://localhost:8080/"},
+		{"[::]:8080", "http://localhost:8080/"},
+		{"127.0.0.1:34567", "http://127.0.0.1:34567/"},
+		{"[::1]:9000", "http://[::1]:9000/"},
+	}
+	for _, c := range cases {
+		if got := webURL(c.in); got != c.want {
+			t.Errorf("webURL(%q) = %q, 期望 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestResolveWebAddrPortOnly 只给端口号时,主机沿用当前环境的默认值:
+// 宿机保持回环(不暴露到局域网),容器里放开以便 -p 映射。
+func TestResolveWebAddrPortOnly(t *testing.T) {
+	dir := t.TempDir()
+	dockerEnv := filepath.Join(dir, ".dockerenv")
+	if err := os.WriteFile(dockerEnv, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 容器内:-addr 9090 → 0.0.0.0:9090
+	os.Setenv(envContainer, "1")
+	defer os.Unsetenv(envContainer)
+	if got := resolveWebAddr("9090"); got != "0.0.0.0:9090" {
+		t.Errorf("容器内 -addr 9090 = %q, 期望 0.0.0.0:9090", got)
+	}
+	// 宿机上:-addr 9090 → 127.0.0.1:9090
+	os.Setenv(envContainer, "0")
+	if got := resolveWebAddr("9090"); got != "127.0.0.1:9090" {
+		t.Errorf("宿机上 -addr 9090 = %q, 期望 127.0.0.1:9090", got)
+	}
+	os.Unsetenv(envContainer)
+	// 完整地址不受影响。
+	if got := resolveWebAddr("1.2.3.4:7777"); got != "1.2.3.4:7777" {
+		t.Errorf("完整地址不该被改写, 实际 %q", got)
+	}
+}

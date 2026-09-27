@@ -135,7 +135,7 @@ func TestExpandInconsistentGroups(t *testing.T) {
 		"/tv/秀A/S01E01.mkv": mk(30), "/tv/秀A/S01E02.mkv": mk(60), "/tv/秀A/S01E03.mkv": mk(90),
 		"/tv/秀B/S01E01.mkv": mk(30), "/tv/秀B/S01E02.mkv": mk(30),
 	}
-	extra := expandInconsistentGroups(items, res, 2)
+	extra := expandInconsistentGroups(items, items, res, 2)
 	if len(extra) != 3 {
 		t.Fatalf("追加项 = %d, 期望 3(秀A 全部)", len(extra))
 	}
@@ -145,8 +145,35 @@ func TestExpandInconsistentGroups(t *testing.T) {
 		}
 	}
 	// sample=0 表示从未抽样,不存在"抽样不一致"的问题。
-	if got := expandInconsistentGroups(items, res, 0); got != nil {
+	if got := expandInconsistentGroups(items, items, res, 0); got != nil {
 		t.Errorf("sample=0 时应返回 nil, 实际 %v", got)
+	}
+}
+
+// TestExpandInconsistentGroupsSkipsCached 有缓存时,重测范围不该波及已记录过的文件:
+// 缓存里的结论当初就是实测出来的,没必要为新增的一集把整部剧再解码一遍。
+func TestExpandInconsistentGroupsSkipsCached(t *testing.T) {
+	items := itemsIn("/tv/秀A", "S01E01.mkv", "S01E02.mkv", "S01E03.mkv", "S01E04.mkv")
+	// E04 是新增文件,只有它没命中缓存。
+	scope := items[3:]
+	res := map[string]auto.Result{
+		"/tv/秀A/S01E01.mkv": {Head: 30, Tail: 45, OK: true},
+		"/tv/秀A/S01E02.mkv": {Head: 30, Tail: 45, OK: true},
+		"/tv/秀A/S01E03.mkv": {Head: 30, Tail: 45, OK: true},
+	}
+	// 缓存里的三集互相一致 → 已有共识,不需要重测。
+	if got := expandInconsistentGroups(items, scope, res, 3); got != nil {
+		t.Errorf("有共识时不应重测, 实际 %v", got)
+	}
+	// 缓存本身也不一致时,只重测本次未命中的那一集。
+	bad := map[string]auto.Result{
+		"/tv/秀A/S01E01.mkv": {Head: 30, Tail: 45, OK: true},
+		"/tv/秀A/S01E02.mkv": {Head: 60, Tail: 45, OK: true},
+		"/tv/秀A/S01E03.mkv": {Head: 90, Tail: 45, OK: true},
+	}
+	got := expandInconsistentGroups(items, scope, bad, 3)
+	if len(got) != 1 || !got["/tv/秀A/S01E04.mkv"] {
+		t.Errorf("无共识时应只重测未命中缓存的文件, 实际 %v", got)
 	}
 }
 
@@ -220,7 +247,7 @@ func TestExpandInconsistentGroupsSingleSample(t *testing.T) {
 		"/tv/秀/S01E01.mkv": mk(30), "/tv/秀/S01E02.mkv": mk(60), "/tv/秀/S01E03.mkv": mk(90),
 	}
 	for _, sample := range []int{0, 1, -1} {
-		if got := expandInconsistentGroups(items, res, sample); got != nil {
+		if got := expandInconsistentGroups(items, items, res, sample); got != nil {
 			t.Errorf("sample=%d 时不该触发重测, 实际 %v", sample, got)
 		}
 	}

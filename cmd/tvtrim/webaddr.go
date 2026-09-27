@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -16,6 +17,12 @@ const (
 	// 容器内若按宿机的默认做法监听 127.0.0.1,宿机通过端口映射永远连不进来,
 	// 因此容器里自动放开到 0.0.0.0,并用固定端口便于 -p 映射。
 	containerWebAddr = "0.0.0.0:8080"
+)
+
+// 只给端口号时补上的默认主机(见 resolveWebAddr)。
+const (
+	localHostAddr     = "127.0.0.1"
+	containerHostAddr = "0.0.0.0"
 )
 
 // externalURLHint 对监听在通配地址上的情况给出容器外的访问提示;
@@ -37,13 +44,24 @@ const envContainer = "TVTRIM_CONTAINER"
 // addr 非空表示用户在命令行显式指定了 -addr,原样使用;
 // 留空则按运行环境选择:容器内 0.0.0.0:8080,宿机 127.0.0.1:0。
 func resolveWebAddr(addr string) string {
-	if addr != "" {
-		return addr
+	if addr == "" {
+		if inContainer() {
+			return containerWebAddr
+		}
+		return localWebAddr
 	}
-	if inContainer() {
-		return containerWebAddr
+	// 只给了端口号(如 -addr 8080):主机沿用当前环境的默认值,
+	// 免得宿机上一次手滑就把界面暴露到局域网。
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		if _, convErr := strconv.Atoi(addr); convErr == nil {
+			host := localHostAddr
+			if inContainer() {
+				host = containerHostAddr
+			}
+			return net.JoinHostPort(host, addr)
+		}
 	}
-	return localWebAddr
+	return addr
 }
 
 // inContainer 判断当前进程是否运行在容器里。

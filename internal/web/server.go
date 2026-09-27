@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -359,9 +360,24 @@ func (s *Server) Listen(addr string) (net.Listener, error) {
 	if addr == "" {
 		addr = "127.0.0.1:0"
 	}
-	if _, _, err := net.SplitHostPort(addr); err != nil {
-		// 只有端口或只有主机名的情况都补成 host:port。
-		addr = net.JoinHostPort(addr, "0")
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// 只给了端口号(如 -addr 8080):按"端口"处理,主机保持通配。
+		// 只给了主机名(如 -addr localhost):端口交给系统分配。
+		if _, convErr := strconv.Atoi(addr); convErr == nil {
+			host, addr = "", net.JoinHostPort("", addr)
+		} else {
+			host = addr
+			addr = net.JoinHostPort(addr, "0")
+		}
+	}
+	// 0.0.0.0 在 Linux 上会被 Go 建成 IPv6 双栈 socket(netstat 里显示成 :::8080)。
+	// 双栈通常没问题,但宿机/容器网络禁用 IPv6 时,docker -p 转发过来的 IPv4
+	// 连接会落空 —— 表面上容器在跑,浏览器就是连不上。这里显式用 tcp4 监听。
+	if host == "0.0.0.0" || host == "" {
+		if ln, err4 := net.Listen("tcp4", addr); err4 == nil {
+			return ln, nil
+		}
 	}
 	return net.Listen("tcp", addr)
 }
