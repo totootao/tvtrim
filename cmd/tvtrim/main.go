@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -29,7 +30,7 @@ import (
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.3.0"
+var version = "1.4.0"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 
@@ -264,7 +265,8 @@ func run(argv []string) error {
 		fmt.Printf("  结尾余量: %s\n", fmtDur(keep))
 	}
 	fmt.Printf("  ffmpeg  : %s\n", runner.Path)
-	fmt.Printf("  待处理  : %d 个文件\n", len(items))
+	// 一个目录里可能混排多部剧,明确告诉用户识别出了几部,便于核对分组是否正确。
+	fmt.Printf("  待处理  : %d 个文件 / %d 部剧\n", len(items), scan.CountShows(items))
 	fmt.Printf("  输出方式: %s\n", describeOutput(o))
 	if o.dryRun {
 		fmt.Printf("  模式    : 预览(dry-run)\n")
@@ -321,22 +323,24 @@ func runAuto(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, o cl
 	}
 
 	fmt.Printf("自动识别结果(静音阈值 %gdB, 切点静音 ≥%.1fs):\n\n", auto.NoiseDB, auto.MinSilence)
-	fmt.Printf("  %-44s %9s %9s  %s\n", "文件", "-head", "-tail", "说明")
+	fmt.Printf("  %-20s %-22s %9s %9s  %s\n", "剧集", "文件", "-head", "-tail", "说明")
 	fmt.Println("  " + strings.Repeat("-", 100))
 	failN := failCount(results)
 	for _, d := range results {
-		name := shortName(d.Item.Path, 42)
+		// 同目录混排多部剧时,剧名列是核对分组是否正确的关键。
+		show := shortName(showNameOf(d.Item), 18)
+		name := shortName(filepath.Base(d.Item.Path), 20)
 		switch {
 		case d.Err != nil:
-			fmt.Printf("  %-44s %10s %10s  ✗ %v\n", name, "-", "-", d.Err)
+			fmt.Printf("  %-20s %-22s %10s %10s  ✗ %v\n", show, name, "-", "-", d.Err)
 		case !d.Res.OK:
-			fmt.Printf("  %-44s %10s %10s  ✗ %s\n", name, "-", "-", d.Res.Note)
+			fmt.Printf("  %-20s %-22s %10s %10s  ✗ %s\n", show, name, "-", "-", d.Res.Note)
 		default:
 			note := d.Res.Note
 			if note == "" {
 				note = "OK"
 			}
-			fmt.Printf("  %-44s %9.1fs %9.1fs  %s\n", name, d.Res.Head, d.Res.Tail, note)
+			fmt.Printf("  %-20s %-22s %9.1fs %9.1fs  %s\n", show, name, d.Res.Head, d.Res.Tail, note)
 		}
 	}
 	fmt.Println("  " + strings.Repeat("-", 100))
@@ -371,6 +375,14 @@ func runAuto(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, o cl
 		return fmt.Errorf("%d 个文件处理失败", batch.Failed)
 	}
 	return nil
+}
+
+// showNameOf 给出用于表格展示的剧名,解析不出时退回目录名。
+func showNameOf(it scan.Item) string {
+	if it.Show != "" {
+		return it.Show
+	}
+	return filepath.Base(filepath.Dir(it.Path))
 }
 
 // runWeb 启动本地 Web 界面:
@@ -444,18 +456,21 @@ func tryOpenBrowser(url string) {
 
 // printPlans 打印裁剪计划表格,返回 (将执行, 跳过) 数量。
 func printPlans(plans []*trim.Plan) (willRun, willSkip int) {
-	fmt.Printf("%-46s %12s %10s %10s %10s\n", "文件", "总时长", "起点", "终点", "裁剪后")
+	fmt.Printf("%-16s %-30s %12s %10s %10s %10s\n", "剧集", "文件", "总时长", "起点", "终点", "裁剪后")
 	fmt.Println(strings.Repeat("-", 94))
 
 	for _, p := range plans {
-		name := shortName(p.Input, 44)
+		// 剧名从文件名解析(scan.ShowOf),解析不出时用目录名兜底。
+		show := shortName(showNameOf(scan.Item{Path: p.Input, Show: scan.ShowOf(filepath.Base(p.Input))}), 14)
+		name := shortName(p.Input, 28)
 		if p.Skip {
 			willSkip++
-			fmt.Printf("%-46s %12s %s\n", name, "-", "跳过: "+p.SkipWhy)
+			fmt.Printf("%-16s %-30s %12s %s\n", show, name, "-", "跳过: "+p.SkipWhy)
 			continue
 		}
 		willRun++
-		fmt.Printf("%-46s %12s %10s %10s %10s\n",
+		fmt.Printf("%-16s %-30s %12s %10s %10s %10s\n",
+			show,
 			name,
 			fmtDur(p.Duration),
 			fmtDur(p.Start),

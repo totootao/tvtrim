@@ -200,6 +200,51 @@ func TestRunAutoDryRun(t *testing.T) {
 	}
 }
 
+// 一个目录里混排多部剧:要认出是 2 部,并在表格里分别标注剧名。
+func TestRunMultipleShowsInOneDir(t *testing.T) {
+	ff, dir := fixture(t,
+		"进击的巨人.S01E01.mkv", "进击的巨人.S01E02.mkv",
+		"权力的游戏.S01E01.mkv", "权力的游戏.S01E02.mkv")
+
+	out, err := captureOutput(t, func() error {
+		return run([]string{"-auto", "-dry-run", "-ffmpeg", ff, dir})
+	})
+	if err != nil {
+		t.Fatalf("多剧目录处理报错: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "4 个文件 / 2 部剧") {
+		t.Errorf("应识别出 2 部剧: %s", out)
+	}
+	for _, show := range []string{"进击的巨人", "权力的游戏"} {
+		if !strings.Contains(out, show) {
+			t.Errorf("结果表应标出剧名 %q: %s", show, out)
+		}
+	}
+	// 预览表格里也应带剧名列。
+	if !strings.Contains(out, "剧集") {
+		t.Errorf("计划表应有剧集列: %s", out)
+	}
+}
+
+// 手动模式下多剧目录同样只按统一的 head/tail 裁剪,但仍应报出部数。
+func TestRunMultipleShowsManualHeadTail(t *testing.T) {
+	ff, dir := fixture(t, "剧A.S01E01.mkv", "剧B.S01E01.mkv")
+	out, err := captureOutput(t, func() error {
+		return run([]string{"-head", "30", "-tail", "40", "-j", "2", "-ffmpeg", ff, dir})
+	})
+	if err != nil {
+		t.Fatalf("多剧批量裁剪报错: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "2 部剧") {
+		t.Errorf("应识别出 2 部剧: %s", out)
+	}
+	for _, n := range []string{"剧A.S01E01-trim.mkv", "剧B.S01E01-trim.mkv"} {
+		if _, err := os.Stat(filepath.Join(dir, n)); err != nil {
+			t.Errorf("输出缺失 %s: %v", n, err)
+		}
+	}
+}
+
 func TestRunInplaceReplacesSource(t *testing.T) {
 	ff, dir := fixture(t, "S01E01.mkv")
 	src := filepath.Join(dir, "S01E01.mkv")

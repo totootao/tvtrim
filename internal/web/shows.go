@@ -33,10 +33,16 @@ type Item struct {
 }
 
 // Show 表示一部剧(或一个季)下的多集。
-// 分组维度是 (文件所在目录, 季号),这样同一目录下混排多季也能分开确认。
+// 分组维度是 (文件所在目录, 剧名, 季号):
+//   - 目录混排多部剧 → 按剧名拆开,可以逐剧确认
+//   - 同目录同剧混排多季 → 按季拆开
+//
+// 剧名来自文件名(见 scan.ShowOf);解析不出来时退化成"该目录算一部剧",
+// 与早期版本行为一致。
 type Show struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
+	Show    string `json:"show"` // 剧名(可能为空,为空表示按目录兜底)
 	Season  int    `json:"season"`
 	Dir     string `json:"dir"`
 	Items   []Item `json:"items"`
@@ -57,17 +63,22 @@ func BuildShows(items []scan.Item, probes map[string]*ffmpeg.ProbeResult,
 	for _, it := range items {
 		dir := filepath.Dir(it.Path)
 		season := it.Season
-		key := fmt.Sprintf("%s|S%02d", dir, season)
+		show := it.Show
+		key := fmt.Sprintf("%s|%s|S%02d", dir, scan.ShowKey(show), season)
 		sh, ok := byKey[key]
 		if !ok {
-			name := filepath.Base(dir)
-			if name == "" || name == "." || name == string(filepath.Separator) {
-				name = dir
+			name := show
+			if name == "" {
+				// 文件名里没有剧名信息时,退回用目录名兜底。
+				name = filepath.Base(dir)
+				if name == "" || name == "." || name == string(filepath.Separator) {
+					name = dir
+				}
 			}
 			if season > 0 {
 				name = fmt.Sprintf("%s  S%02d", name, season)
 			}
-			sh = &Show{ID: key, Name: name, Season: season, Dir: dir}
+			sh = &Show{ID: key, Name: name, Show: show, Season: season, Dir: dir}
 			byKey[key] = sh
 			order = append(order, key)
 		}
@@ -108,10 +119,19 @@ func BuildShows(items []scan.Item, probes map[string]*ffmpeg.ProbeResult,
 		sh.Items = append(sh.Items, item)
 	}
 
-	// 排序规则:有季号的分组在前,全部没季号的分组(通常是花絮/预告等零散文件)在后,
-	// 组内再按 ID(目录|季)字典序,保证多次刷新顺序稳定。
+	// 排序规则:
+	//   1. 认得出剧名的在前,认不出的(按目录兜底,通常是花絮/零散文件)在后
+	//   2. 同为有剧名的按剧名排,同剧名的按 ID(目录|剧名|季)排
+	//   3. 兜底组里季号为 0 的排最后
+	// 目的是让"一部剧"在页面上总是连续出现,便于按剧核对。
 	sort.SliceStable(order, func(i, j int) bool {
 		a, b := byKey[order[i]], byKey[order[j]]
+		if (a.Show == "") != (b.Show == "") {
+			return b.Show == ""
+		}
+		if a.Show != "" && a.Show != b.Show {
+			return a.Show < b.Show
+		}
 		if (a.Season == 0) != (b.Season == 0) {
 			return b.Season == 0
 		}

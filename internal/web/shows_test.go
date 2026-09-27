@@ -142,6 +142,70 @@ func TestBuildShowsSplitsSeasons(t *testing.T) {
 	}
 }
 
+// 同一个目录里混排多部剧:应按剧名拆成独立分组,可以逐剧确认执行。
+func TestBuildShowsSplitsMultipleShowsInOneDir(t *testing.T) {
+	dir := "/media/混排"
+	items := []scan.Item{
+		itemOf(dir, "进击的巨人.S01E01.mkv", 100, 1, 1),
+		itemOf(dir, "进击的巨人.S01E02.mkv", 100, 1, 2),
+		itemOf(dir, "权力的游戏.S01E01.mkv", 300, 1, 1),
+		itemOf(dir, "权力的游戏.S01E02.mkv", 300, 1, 2),
+		itemOf(dir, "权力的游戏.S01E03.mkv", 300, 1, 3),
+	}
+	for i := range items {
+		items[i].Show = scan.ShowOf(filepath.Base(items[i].Path))
+	}
+
+	shows := BuildShows(items, nil, nil, 30, 45)
+	if len(shows) != 2 {
+		t.Fatalf("同目录 2 部剧应拆成 2 组,实际 %d", len(shows))
+	}
+	// 按剧名排序:"权力的游戏" 与 "进击的巨人" 的字典序由 UTF-8 决定,
+	// 这里只要求两组各自完整、互不混杂。
+	byShow := map[string]Show{}
+	for _, sh := range shows {
+		byShow[sh.Show] = sh
+	}
+	a, ok := byShow["进击的巨人"]
+	if !ok {
+		t.Fatalf("缺剧名分组: %+v", shows)
+	}
+	if len(a.Items) != 2 || a.Ready != 2 || a.TotalIn != 200 {
+		t.Errorf("进击的巨人: 集数=%d ready=%d 体积=%d", len(a.Items), a.Ready, a.TotalIn)
+	}
+	b := byShow["权力的游戏"]
+	if len(b.Items) != 3 || b.Ready != 3 || b.TotalIn != 900 {
+		t.Errorf("权力的游戏: 集数=%d ready=%d 体积=%d", len(b.Items), b.Ready, b.TotalIn)
+	}
+	if a.ID == b.ID {
+		t.Error("两部剧的分组 ID 不应相同")
+	}
+	// 分组名带季号后缀,便于区分同名剧的不同季。
+	if !strings.Contains(a.Name, "S01") {
+		t.Errorf("分组名应带季号: %q", a.Name)
+	}
+}
+
+// 剧名写法不同(点/下划线/大小写)应视为同一部剧。
+func TestBuildShowsMergesNameVariants(t *testing.T) {
+	dir := "/media/x"
+	items := []scan.Item{
+		itemOf(dir, "The.Show.S01E01.mkv", 1, 1, 1),
+		itemOf(dir, "The-Show.S01E02.mkv", 1, 1, 2),
+		itemOf(dir, "the_show.S01E03.mkv", 1, 1, 3),
+	}
+	for i := range items {
+		items[i].Show = scan.ShowOf(filepath.Base(items[i].Path))
+	}
+	shows := BuildShows(items, nil, nil, 10, 10)
+	if len(shows) != 1 {
+		t.Fatalf("写法不同的同一部剧应合并成 1 组,实际 %d", len(shows))
+	}
+	if len(shows[0].Items) != 3 {
+		t.Errorf("应有 3 集,实际 %d", len(shows[0].Items))
+	}
+}
+
 // 不同季混排时没有季号的零散文件单独成组,且排在有季号的分组之后。
 func TestBuildShowsUnnumberedSeasonLast(t *testing.T) {
 	dir := "/media/mix"

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"sync"
@@ -87,26 +88,50 @@ func detectAll(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, wo
 	return ordered
 }
 
-// applyModeCorrection 对多集识别结果做众数纠错,并在 Note 上附加一致率。
+// applyModeCorrection 对识别结果做众数纠错,并在 Note 上附加一致率。
 // ordered 会被就地修改(res 替换为纠错后的结果)。
+//
+// 关键:纠错必须**按剧分别进行**。同一个目录里可能混排多部剧,各部剧的
+// OP/ED 时长本来就不一样,混在一起做众数纠错会把少数剧的切点强行拉向多数剧,
+// 反而制造误判。分组维度是 (目录, 剧名, 季)。
 func applyModeCorrection(ordered []detectResult) {
-	var oks []auto.Result
-	var okIdx []int
+	groups := map[string][]int{}
+	var keys []string
 	for i, d := range ordered {
-		if d.OK() {
-			oks = append(oks, d.Res)
-			okIdx = append(okIdx, i)
+		if !d.OK() {
+			continue
+		}
+		k := showGroupKey(d.Item)
+		if _, seen := groups[k]; !seen {
+			keys = append(keys, k)
+		}
+		groups[k] = append(groups[k], i)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		okIdx := groups[k]
+		oks := make([]auto.Result, 0, len(okIdx))
+		for _, i := range okIdx {
+			oks = append(oks, ordered[i].Res)
+		}
+		corrected := auto.Correct(oks) // Correct 不修改入参,返回纠错后的副本
+		for ci, oi := range okIdx {
+			r := corrected[ci]
+			if len(oks) > 1 {
+				agree, total := auto.Agreement(oks, ci) // 一致率按纠错前的原始结果计算
+				r.Note = fmt.Sprintf("[一致 %d/%d] ", agree, total) + r.Note
+			}
+			ordered[oi].Res = r
 		}
 	}
-	corrected := auto.Correct(oks) // Correct 不修改入参,返回纠错后的副本
-	for ci, oi := range okIdx {
-		r := corrected[ci]
-		if len(oks) > 1 {
-			agree, total := auto.Agreement(oks, ci) // 一致率按纠错前的原始结果计算
-			r.Note = fmt.Sprintf("[一致 %d/%d] ", agree, total) + r.Note
-		}
-		ordered[oi].Res = r
-	}
+}
+
+// showGroupKey 给出"剧"的唯一标识:目录 + 归一化剧名 + 季号。
+// 剧名解析不出来时退化成目录,行为与旧版本一致(同目录算一部剧)。
+func showGroupKey(it scan.Item) string {
+	return fmt.Sprintf("%s|%s|S%02d",
+		filepath.Dir(it.Path), scan.ShowKey(it.Show), it.Season)
 }
 
 // effectiveWorkers 计算实际并发数:<=0 取 CPU 核数,且不超过任务数。

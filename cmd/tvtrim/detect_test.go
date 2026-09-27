@@ -148,6 +148,98 @@ func TestApplyModeCorrectionFixesOutlier(t *testing.T) {
 	}
 }
 
+// 同一个目录里混排两部剧时,众数纠错必须按剧分别进行:
+// A 剧多为 96.5s、B 剧多为 60s,两组各有一集离群,应各自向"本剧多数派"靠拢,
+// 而不是被对方带偏(A 剧的 4 集不能被 B 剧拉成 60s,反之亦然)。
+func TestApplyModeCorrectionPerShow(t *testing.T) {
+	dir := "/media/混排"
+	ep := func(show string, season, episode int, head, tail float64) detectResult {
+		return detectResult{
+			Item: scan.Item{
+				Path:    filepath.Join(dir, show+".S01E0x.mkv"),
+				Show:    show,
+				Season:  season,
+				Episode: episode,
+			},
+			Res: auto.Result{OK: true, Head: head, Tail: tail},
+		}
+	}
+	results := []detectResult{
+		ep("剧A", 1, 1, 96.5, 100),
+		ep("剧A", 1, 2, 96.5, 100),
+		ep("剧A", 1, 3, 96.5, 100),
+		ep("剧A", 1, 4, 88.0, 100), // A 剧内的离群集
+		ep("剧B", 1, 1, 60.0, 40),
+		ep("剧B", 1, 2, 60.0, 40),
+		ep("剧B", 1, 3, 52.0, 40), // B 剧内的离群集
+	}
+	applyModeCorrection(results)
+
+	for i, want := range []float64{96.5, 96.5, 96.5, 96.5, 60.0, 60.0, 60.0} {
+		if got := results[i].Res.Head; got != want {
+			t.Errorf("第 %d 集 head = %.2f, 期望 %.2f(按剧纠偏后)", i+1, got, want)
+		}
+	}
+	// 只有各自剧内的离群集应被标记。
+	if results[3].Res.Fixed != true || results[6].Res.Fixed != true {
+		t.Errorf("应修正各自剧内的离群集: A=%v B=%v", results[3].Res.Fixed, results[6].Res.Fixed)
+	}
+	if results[0].Res.Fixed || results[4].Res.Fixed {
+		t.Error("多数派不应被标记修正")
+	}
+	// 一致率按"本剧集数"统计(分母是本剧集数,不是全部文件数):
+	// A 剧 4 集里有 1 集离群 → 多数集显示 3/4;B 剧 3 集里有 1 集离群 → 2/3。
+	if !strings.HasPrefix(results[0].Res.Note, "[一致 3/4] ") {
+		t.Errorf("A 剧一致率前缀不符: %q", results[0].Res.Note)
+	}
+	if !strings.HasPrefix(results[4].Res.Note, "[一致 2/3] ") {
+		t.Errorf("B 剧一致率前缀不符: %q", results[4].Res.Note)
+	}
+	// 离群集自身的一致率最低。
+	if !strings.HasPrefix(results[3].Res.Note, "[一致 1/4] ") {
+		t.Errorf("A 剧离群集一致率应为 1/4,实际 %q", results[3].Res.Note)
+	}
+}
+
+// 不同季的同名剧也应分开纠错(续作 OP 时长经常变)。
+func TestApplyModeCorrectionSplitsSeasons(t *testing.T) {
+	mk := func(season int, head float64) detectResult {
+		return detectResult{
+			Item: scan.Item{Path: fmt.Sprintf("/m/S01E01-%d.mkv", season), Show: "某剧", Season: season},
+			Res:  auto.Result{OK: true, Head: head, Tail: 50},
+		}
+	}
+	results := []detectResult{mk(1, 96.5), mk(1, 96.5), mk(2, 70), mk(2, 70), mk(2, 62)}
+	applyModeCorrection(results)
+	if results[0].Res.Head != 96.5 || results[2].Res.Head != 70 {
+		t.Errorf("两季应各自纠偏: S1=%.2f S2=%.2f", results[0].Res.Head, results[2].Res.Head)
+	}
+	if results[4].Res.Head != 70 {
+		t.Errorf("第二季的离群集应修正为 70,实际 %.2f", results[4].Res.Head)
+	}
+}
+
+// 文件名里没有剧名信息时退化为"按目录"纠错(与旧行为一致)。
+func TestApplyModeCorrectionFallsBackToDir(t *testing.T) {
+	mk := func(dir string, head float64) detectResult {
+		return detectResult{
+			Item: scan.Item{Path: filepath.Join(dir, "S01E01.mkv")},
+			Res:  auto.Result{OK: true, Head: head, Tail: 50},
+		}
+	}
+	results := []detectResult{
+		mk("/media/d1", 96.5), mk("/media/d1", 96.5), mk("/media/d1", 80),
+		mk("/media/d2", 40), mk("/media/d2", 40),
+	}
+	applyModeCorrection(results)
+	if results[2].Res.Head != 96.5 {
+		t.Errorf("同目录内应纠偏到 96.5,实际 %.2f", results[2].Res.Head)
+	}
+	if results[3].Res.Head != 40 {
+		t.Errorf("另一目录不应被影响,实际 %.2f", results[3].Res.Head)
+	}
+}
+
 func TestEffectiveWorkers(t *testing.T) {
 	cases := []struct {
 		name       string

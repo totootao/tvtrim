@@ -18,6 +18,9 @@ type Item struct {
 	// Season, Episode 是从文件名里解析出的季/集编号(解析不到为 0)。
 	Season  int
 	Episode int
+	// Show 是从文件名里解析出的剧名(解析不到为空,此时分组回退到目录名)。
+	// 一个目录里往往混排多部剧,靠这个字段才能把它们拆开处理。
+	Show string
 }
 
 // Options 控制扫描行为。
@@ -86,6 +89,7 @@ func Collect(inputs []string, opts Options) ([]Item, error) {
 		season, episode := ParseEpisode(base)
 		items = append(items, Item{
 			Path: abs, Size: st.Size(), Season: season, Episode: episode,
+			Show: ShowOf(base),
 		})
 		return nil
 	}
@@ -168,24 +172,24 @@ func ParseEpisode(name string) (season, episode int) {
 	lower := strings.ToLower(base)
 
 	// S01E02 / s1e2
-	if s, e, ok := matchSE(lower); ok {
+	if s, e, _, ok := findSE(lower); ok {
 		return s, e
 	}
 
 	// 第01集 / 第1话
-	if e, ok := matchChineseEp(base); ok {
+	if e, _, ok := findChineseEp(base); ok {
 		return 0, e
 	}
 
 	// EP02 / E02 / 第02集
-	if e, ok := matchPrefixEp(lower); ok {
+	if e, _, ok := findPrefixEp(lower); ok {
 		return 0, e
 	}
 	return 0, 0
 }
 
-// matchSE 解析 SxxExx 形式。
-func matchSE(s string) (int, int, bool) {
+// findSE 解析 SxxExx 形式,同时返回标记的起始下标(用于截取剧名)。
+func findSE(s string) (season, episode, idx int, ok bool) {
 	for i := 0; i+1 < len(s); i++ {
 		if s[i] != 's' {
 			continue
@@ -207,13 +211,19 @@ func matchSE(s string) (int, int, bool) {
 		if k == j+1 {
 			continue
 		}
-		return atoi(s[i+1 : j]), atoi(s[j+1 : k]), true
+		return atoi(s[i+1 : j]), atoi(s[j+1 : k]), i, true
 	}
-	return 0, 0, false
+	return 0, 0, -1, false
 }
 
-// matchChineseEp 解析 "第N集/话/期/部" 形式。
-func matchChineseEp(s string) (int, bool) {
+// matchSE 解析 SxxExx 形式。
+func matchSE(s string) (int, int, bool) {
+	s1, e1, _, ok := findSE(s)
+	return s1, e1, ok
+}
+
+// findChineseEp 解析 "第N集/话/期/部" 形式,返回剧集号与"第"的下标。
+func findChineseEp(s string) (episode, idx int, ok bool) {
 	for _, marker := range []string{"第"} {
 		idx := strings.Index(s, marker)
 		for idx >= 0 {
@@ -225,7 +235,7 @@ func matchChineseEp(s string) (int, bool) {
 			if k > j && k < len(s) {
 				next := string([]rune(s[k:])[0])
 				if next == "集" || next == "话" || next == "期" || next == "部" {
-					return atoi(s[j:k]), true
+					return atoi(s[j:k]), idx, true
 				}
 			}
 			next := strings.Index(s[idx+1:], marker)
@@ -235,11 +245,17 @@ func matchChineseEp(s string) (int, bool) {
 			idx = idx + 1 + next
 		}
 	}
-	return 0, false
+	return 0, -1, false
 }
 
-// matchPrefixEp 解析 "EP02"/"E02" 形式。
-func matchPrefixEp(s string) (int, bool) {
+// matchChineseEp 解析 "第N集/话/期/部" 形式。
+func matchChineseEp(s string) (int, bool) {
+	e, _, ok := findChineseEp(s)
+	return e, ok
+}
+
+// findPrefixEp 解析 "EP02"/"E02" 形式,返回集号与标记下标。
+func findPrefixEp(s string) (episode, idx int, ok bool) {
 	for _, p := range []string{"ep", "e"} {
 		idx := strings.Index(s, p)
 		if idx < 0 {
@@ -258,10 +274,16 @@ func matchPrefixEp(s string) (int, bool) {
 			k++
 		}
 		if k > j {
-			return atoi(s[j:k]), true
+			return atoi(s[j:k]), idx, true
 		}
 	}
-	return 0, false
+	return 0, -1, false
+}
+
+// matchPrefixEp 解析 "EP02"/"E02" 形式。
+func matchPrefixEp(s string) (int, bool) {
+	e, _, ok := findPrefixEp(s)
+	return e, ok
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
