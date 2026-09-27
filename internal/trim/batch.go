@@ -53,6 +53,13 @@ type BatchResult struct {
 	TotalOut int64 // 输出总字节数
 }
 
+// indexedResult 记住结果对应的序号,好让最终 res.Results 的顺序
+// 跟着输入走 —— 否则每次运行的汇总表顺序都不一样。
+type indexedResult struct {
+	i   int
+	res Result
+}
+
 // RunBatch 对文件列表并发执行裁剪。
 //
 // 流程:先并行探测(读时长),据此计算计划并过滤掉需要跳过的文件,
@@ -80,7 +87,10 @@ func RunBatch(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opt
 	}
 
 	// 阶段一:并行探测时长。
+	// 按输入顺序预占位:并发完成有先后,但 plans 的顺序必须与 items 一致,
+	// 否则同一个命令跑两次,计划表里的行会换来换去,输出没法 diff。
 	type probeOut struct {
+		idx   int
 		item  scan.Item
 		probe *ffmpeg.ProbeResult
 		err   error
@@ -89,25 +99,24 @@ func RunBatch(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opt
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 
-	for _, it := range items {
+	for i, it := range items {
 		wg.Add(1)
-		go func(it scan.Item) {
+		go func(i int, it scan.Item) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			p, err := runner.Probe(ctx, it.Path)
-			probeCh <- probeOut{item: it, probe: p, err: err}
-		}(it)
+			probeCh <- probeOut{idx: i, item: it, probe: p, err: err}
+		}(i, it)
 	}
 	go func() { wg.Wait(); close(probeCh) }()
 
-	var plans []*Plan
+	plans := make([]*Plan, len(items))
 	for po := range probeCh {
 		if po.err != nil {
 			res.Failed++
-			plan := &Plan{Input: po.item.Path, Skip: true, SkipWhy: po.err.Error()}
-			plans = append(plans, plan)
+			plans[po.idx] = &Plan{Input: po.item.Path, Skip: true, SkipWhy: po.err.Error()}
 			logf("✗ 探测失败 %s: %v", po.item.Path, po.err)
 			continue
 		}
@@ -118,8 +127,7 @@ func RunBatch(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opt
 		if ht, ok := opts.HeadTailOverride[po.item.Path]; ok {
 			t.Head, t.Tail = ht.Head, ht.Tail
 		}
-		p := BuildPlan(po.probe, t)
-		plans = append(plans, p)
+		plans[po.idx] = BuildPlan(po.probe, t)
 	}
 
 	// 阶段二:区分可执行项与被跳过项。
@@ -154,31 +162,33 @@ func RunBatch(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opt
 
 	// 阶段三:并行裁剪。
 	exec := &Executor{FFmpeg: runner, Opts: opts.Trim, Log: nil}
-	resultCh := make(chan Result, len(runnable))
+	resultOut := make([]Result, len(runnable))
+	resultCh := make(chan indexedResult, len(runnable))
 	var wg2 sync.WaitGroup
 	sem2 := make(chan struct{}, workers)
 
 	// 先把探测阶段的失败项放进结果,保证汇总完整。
 	res.Results = append(res.Results, failures...)
 
-	for _, p := range runnable {
+	for i, p := range runnable {
 		wg2.Add(1)
-		go func(p *Plan) {
+		go func(i int, p *Plan) {
 			defer wg2.Done()
 			sem2 <- struct{}{}
 			defer func() { <-sem2 }()
 
 			t0 := time.Now()
 			out, err := exec.Run(ctx, p)
-			resultCh <- Result{Plan: p, Output: out, Err: err, Elapsed: time.Since(t0)}
-		}(p)
+			resultCh <- indexedResult{i: i, res: Result{Plan: p, Output: out, Err: err, Elapsed: time.Since(t0)}}
+		}(i, p)
 	}
 	go func() { wg2.Wait(); close(resultCh) }()
 
 	var mu sync.Mutex
-	for r := range resultCh {
+	for ir := range resultCh {
+		r := ir.res
+		resultOut[ir.i] = r
 		mu.Lock()
-		res.Results = append(res.Results, r)
 		if r.Err != nil {
 			res.Failed++
 			logf("✗ 裁剪失败 %s: %v", r.Plan.Input, r.Err)
@@ -191,6 +201,7 @@ func RunBatch(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opt
 			cb(r)
 		}
 	}
+	res.Results = append(res.Results, resultOut...)
 
 	// 汇总输出体积。
 	mu.Lock()
@@ -213,14 +224,14 @@ func Plans(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opts O
 		workers = runtime.NumCPU()
 	}
 	var (
-		mu    sync.Mutex
-		plans []*Plan
-		wg    sync.WaitGroup
-		sem   = make(chan struct{}, workers)
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, workers)
 	)
-	for _, it := range items {
+	plans := make([]*Plan, len(items))
+	for i, it := range items {
 		wg.Add(1)
-		go func(it scan.Item) {
+		go func(i int, it scan.Item) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -229,11 +240,11 @@ func Plans(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item, opts O
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				plans = append(plans, &Plan{Input: it.Path, Skip: true, SkipWhy: err.Error()})
+				plans[i] = &Plan{Input: it.Path, Skip: true, SkipWhy: err.Error()}
 				return
 			}
-			plans = append(plans, BuildPlan(p, opts))
-		}(it)
+			plans[i] = BuildPlan(p, opts)
+		}(i, it)
 	}
 	wg.Wait()
 	return plans

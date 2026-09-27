@@ -262,3 +262,55 @@ func TestStatSizeMissingFile(t *testing.T) {
 		t.Error("不存在的文件应报错")
 	}
 }
+
+// 并发探测先先后后,但计划表的顺序必须跟着入参走:
+// 否则同一个命令跑两次,dry-run 表格里的行会换来换去,没法 diff。
+func TestPlansKeepsInputOrder(t *testing.T) {
+	dir := t.TempDir()
+	names := []string{"e01.mkv", "e02.mkv", "e03.mkv", "e04.mkv", "e05.mkv",
+		"e06.mkv", "e07.mkv", "e08.mkv", "e09.mkv", "e10.mkv", "e11.mkv", "e12.mkv"}
+	var items []scan.Item
+	for _, n := range names {
+		items = append(items, scan.Item{Path: testkit.WriteFile(t, dir, n, "x"), Size: 512})
+	}
+	r := newFakeRunner(t, probeStderrOf(items[0].Path), "")
+
+	for round := 0; round < 5; round++ {
+		plans := Plans(context.Background(), r, items, Options{Head: 30 * time.Second, Tail: 40 * time.Second}, 4)
+		if len(plans) != len(items) {
+			t.Fatalf("第 %d 轮: 计划数 = %d, 期望 %d", round, len(plans), len(items))
+		}
+		for i, p := range plans {
+			if p.Input != items[i].Path {
+				t.Fatalf("第 %d 轮第 %d 项 = %q, 期望按入参顺序 %q", round, i, p.Input, items[i].Path)
+			}
+		}
+	}
+}
+
+// 真实执行时汇总表的顺序同样要稳定。
+func TestRunBatchResultsKeepInputOrder(t *testing.T) {
+	dir := t.TempDir()
+	var items []scan.Item
+	for _, n := range []string{"e01.mkv", "e02.mkv", "e03.mkv", "e04.mkv",
+		"e05.mkv", "e06.mkv", "e07.mkv", "e08.mkv"} {
+		items = append(items, scan.Item{Path: testkit.WriteFile(t, dir, n, "x"), Size: 1024})
+	}
+	r := newFakeRunner(t, probeStderrOf(items[0].Path), testkit.ModeCopy)
+
+	res := RunBatch(context.Background(), r, items, BatchOptions{
+		Trim: Options{
+			Head: 10 * time.Second, Tail: 10 * time.Second,
+			MinDuration: time.Second, Overwrite: true,
+		},
+		Workers: 4,
+	})
+	if len(res.Results) != len(items) {
+		t.Fatalf("结果数 = %d, 期望 %d", len(res.Results), len(items))
+	}
+	for i, got := range res.Results {
+		if got.Plan.Input != items[i].Path {
+			t.Fatalf("第 %d 项 = %q, 期望按入参顺序 %q", i, got.Plan.Input, items[i].Path)
+		}
+	}
+}
