@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -227,4 +228,30 @@ func TestExpandInconsistentGroupsSingleSample(t *testing.T) {
 
 func TestFprintlnNilWriter(t *testing.T) {
 	fprintln(nil, "这行不会写出去") // 只需不 panic
+}
+
+// TestDetectAllSampleMatchesFullScan 是核心不变量:
+// 同一素材下抽样识别的结果必须与逐集全量识别完全一致。
+func TestDetectAllSampleMatchesFullScan(t *testing.T) {
+	runner := newRunner(t)
+	items := sampleItems(t, 6)
+
+	sampled := detectAll(context.Background(), runner, items,
+		detectConfig{Mode: DetectSilence, Sample: DefaultSamplePerShow})
+	full := detectAll(context.Background(), runner, items,
+		detectConfig{Mode: DetectSilence, Sample: 0})
+
+	if len(sampled) != len(full) {
+		t.Fatalf("结果条数不一致: 抽样 %d / 全量 %d", len(sampled), len(full))
+	}
+	for i := range sampled {
+		a, b := sampled[i].Res, full[i].Res
+		if a.OK != b.OK {
+			t.Fatalf("%s: OK 不一致 (抽样 %v / 全量 %v)", sampled[i].Item.Path, a.OK, b.OK)
+		}
+		if a.Head != b.Head || a.Tail != b.Tail {
+			t.Errorf("%s: 切点不一致 — 抽样 head=%v tail=%v / 全量 head=%v tail=%v",
+				sampled[i].Item.Path, a.Head, a.Tail, b.Head, b.Tail)
+		}
+	}
 }
