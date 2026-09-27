@@ -7,7 +7,7 @@
 ```console
 $ tvtrim -auto -dry-run ./某剧第一季/
 
-tvtrim 1.4.0
+tvtrim 1.4.1
   模式    : 自动识别片头/片尾(静音检测)
   ffmpeg  : /root/.cache/tvtrim/ffmpeg-linux-amd64
   待处理  : 24 个文件 / 1 部剧
@@ -70,18 +70,22 @@ docker run --rm -v "$PWD/某剧.S01":/media totootao/tvtrim -auto /media
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/某剧.S01":/media \
   totootao/tvtrim -head 90 -tail 60 /media
 
-# Web 界面:必须监听 0.0.0.0,否则容器外访问不到
-docker run --rm -p 8080:8080 -v "$PWD/某剧":/media \
-  totootao/tvtrim -web -auto -no-open -addr 0.0.0.0:8080 /media
+# Web 界面:容器里自动监听 0.0.0.0:8080,不用再手写 -addr
+docker run --rm -p 8080:8080 --user "$(id -u):$(id -g)" -v "$PWD/某剧":/media \
+  totootao/tvtrim -web -auto /media
 ```
 
-容器默认工作目录 `/media`,入口就是 `tvtrim`,所以 `- /media` 之后的参数与命令行版一致。
+容器默认工作目录 `/media`,入口就是 `tvtrim`,所以镜像名之后的参数与命令行版一致。
+
+`-web` 在容器内会自动监听 `0.0.0.0:8080`(宿机上仍是安全的
+`127.0.0.1:随机端口`),并且不会尝试启动浏览器 —— 上面的 `-p 8080:8080`
+加上之后浏览器打开 `http://localhost:8080/` 即可。`-addr` 仍然优先于这个默认值。
 
 | 镜像标签 | 含义 |
 |---|---|
 | `totootao/tvtrim:latest` | main 分支最新构建 |
 | `totootao/tvtrim:main` | 同上(buildx 分支标签) |
-| `totootao/tvtrim:1.4` / `:1.4.0` | 对应 `v*` tag 发布的版本 |
+| `totootao/tvtrim:1.4` / `:1.4.1` | 对应 `v*` tag 发布的版本 |
 
 ## 用法
 
@@ -126,8 +130,8 @@ tvtrim -head 90s -tail 60s -j 4 ./某剧.S01/
 |---|---|---|
 | `-auto` | 自动识别片头/片尾(与 `-head`/`-tail` 互斥) | 关闭 |
 | `-web` | 启动 Web 界面,人工确认后再执行 | 关闭 |
-| `-addr <地址>` | Web 监听地址 | `127.0.0.1:0` |
-| `-no-open` | `-web` 时不自动打开浏览器 | 关闭 |
+| `-addr <地址>` | Web 监听地址,默认宿机 `127.0.0.1:0`、容器内 `0.0.0.0:8080` | 见左 |
+| `-no-open` | `-web` 时不自动打开浏览器(容器内自动不尝试) | 关闭 |
 | `-head <时长>` | 要砍掉的片头时长 | — |
 | `-tail <时长>` | 要砍掉的片尾时长 | — |
 | `-keep <时长>` | 结尾额外保留的安全余量,会让输出更短 | `0` |
@@ -273,10 +277,13 @@ tvtrim -web -head 90 -tail 60 ./某剧.S01/ # 手动时长 → 页面微调后�
 tvtrim -web -auto -addr 0.0.0.0:8080 ./某剧/  # 指定监听地址(注意安全)
 ```
 
-启动后会打印本地地址并尝试自动打开浏览器(`-no-open` 可关掉):
+容器内运行(Docker / Kubernetes)时无需写 `-addr`:tvtrim 会自动探测并监听
+`0.0.0.0:8080`,因为容器的回环地址外部是连不进来的。见下文「监听地址的选择」。
+
+启动后会打印本地地址并尝试自动打开浏览器(`-no-open` 可关掉,容器内自动不尝试):
 
 ```console
-tvtrim 1.4.0
+tvtrim 1.4.1
   待处理  : 7 个文件 / 2 部剧
   正在自动识别切点(7 个文件)…
   识别完成: 7 成功
@@ -322,8 +329,28 @@ curl -s localhost:34567/api/run -H 'Content-Type: application/json' -d '{
 curl -s localhost:34567/api/progress
 ```
 
-> 安全提醒:默认只监听 `127.0.0.1`,用 `-addr 0.0.0.0:...` 对外暴露时任何人都能
+> 安全提醒:宿机上默认只监听 `127.0.0.1`,用 `-addr 0.0.0.0:...` 对外暴露时任何人都能
 > 读写你本机上的媒体文件,请确认网络环境可信。
+
+### 监听地址的选择
+
+`-addr` 留空时按运行环境决定默认值,这样就不用在容器里额外加参数:
+
+| 运行环境 | 默认监听 | 原因 |
+|---|---|---|
+| 宿机 | `127.0.0.1:随机端口` | 只监听回环,同网段其他人访问不到,最安全 |
+| 容器 | `0.0.0.0:8080` | 容器回环外部连不进来,必须放开;固定端口便于 `-p` 映射 |
+
+判定依据是 `/.dockerenv` 与 `/proc/1/cgroup` 里的 `docker` / `kubepods` /
+`containerd` 等标记,也可用 `TVTRIM_CONTAINER=1` 或 `=0` 强制指定。
+命令行显式给出的 `-addr` 永远优先。
+
+监听在 `0.0.0.0` 时终端会多打一行提示,告诉你怎么用 `-p` 映射:
+
+```console
+  Web 界面: http://[::]:8080/
+  容器模式: 容器端口 8080,用 docker -p <宿机端口>:8080 映射后访问 http://localhost:<宿机端口>/
+```
 
 ## ffmpeg-trim 的获取
 
@@ -349,6 +376,7 @@ ffmpeg-trim 从 v1 升到 v2)就删除旧缓存并重新下载。所以升级 tv
 |---|---|
 | `TVTRIM_FFMPEG` | 指定 ffmpeg 路径 |
 | `TVTRIM_PROXY` | GitHub 代理前缀,默认 `https://ghproxy.totootao.top`,设为 `none` 直连 |
+| `TVTRIM_CONTAINER` | 覆盖 `-web` 的默认监听地址:`1`/`true` 按容器处理(监听 `0.0.0.0:8080`),`0`/`false` 按宿机处理(监听回环随机端口)。不设则自动探测 `/.dockerenv` 与 `/proc/1/cgroup` |
 
 ## 开发
 

@@ -30,7 +30,7 @@ import (
 )
 
 // version 在构建时可通过 -ldflags 注入。
-var version = "1.4.0"
+var version = "1.4.1"
 
 const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编码)
 
@@ -40,8 +40,9 @@ const usage = `tvtrim - 电视剧剧集去头去尾(基于 ffmpeg-trim,零重编
 选项:
   -auto            自动识别片头/片尾(基于静音检测,多集自动纠错)
   -web             启动 Web 界面:扫描后人工按剧确认再执行
-  -addr <地址>     Web 监听地址,默认 127.0.0.1:0(端口 0 自动分配)
-  -no-open         -web 时不自动打开浏览器
+  -addr <地址>     Web 监听地址,默认宿机 127.0.0.1:0(端口自动分配)、
+                   容器内 0.0.0.0:8080
+  -no-open         -web 时不自动打开浏览器(容器内自动不尝试)
   -head <时长>     要砍掉的片头时长,如 90、1m30s、0:90
   -tail <时长>     要砍掉的片尾时长,如 60、1m、0:45
   -keep <时长>     结尾额外保留的安全余量(会让输出更短,默认 0)
@@ -129,7 +130,7 @@ func run(argv []string) error {
 
 	fs.BoolVar(&o.auto, "auto", false, "自动识别片头/片尾(静音检测+多集纠错)")
 	fs.BoolVar(&o.web, "web", false, "启动 Web 界面:扫描后人工确认每部剧再执行")
-	fs.StringVar(&o.addr, "addr", "127.0.0.1:0", "Web 监听地址(端口 0 自动分配)")
+	fs.StringVar(&o.addr, "addr", "", "Web 监听地址(默认宿机 127.0.0.1:0,容器内 0.0.0.0:8080)")
 	fs.StringVar(&o.head, "head", "", "要砍掉的片头时长(如 90 / 1m30s)")
 	fs.StringVar(&o.tail, "tail", "", "要砍掉的片尾时长(如 60 / 1m)")
 	fs.StringVar(&o.keep, "keep", "", "结尾额外保留的安全余量")
@@ -422,16 +423,23 @@ func runWeb(ctx context.Context, runner *ffmpeg.Runner, items []scan.Item,
 	shows := web.BuildShows(items, probes, detects, head.Seconds(), tail.Seconds())
 	srv := web.New(runner, shows, trimOpts, o.workers, version, mode)
 
-	ln, err := srv.Listen(o.addr)
+	// -addr 留空时按运行环境决定:容器里监听 0.0.0.0:8080,否则监听回环随机端口。
+	addr := resolveWebAddr(o.addr)
+	ln, err := srv.Listen(addr)
 	if err != nil {
 		return fmt.Errorf("启动 Web 服务失败: %w", err)
 	}
-	url := fmt.Sprintf("http://%s/", ln.Addr().String())
+	actual := ln.Addr().String()
+	url := fmt.Sprintf("http://%s/", actual)
 	fmt.Printf("  Web 界面: %s\n", url)
+	// 监听地址是通配地址(容器里的默认值)时,提示容器外怎么访问。
+	if hint := externalURLHint(actual); hint != "" {
+		fmt.Printf("  容器模式: %s\n", hint)
+	}
 	fmt.Printf("  输出方式: %s\n", describeOutput(o))
 	fmt.Println("\n在浏览器里勾选要处理的剧集,确认后执行。Ctrl+C 或点页面上的\"退出\"结束。")
 
-	if !o.noOpen {
+	if !o.noOpen && !inContainer() {
 		go tryOpenBrowser(url)
 	}
 	return srv.Serve(ctx, ln)

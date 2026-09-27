@@ -52,6 +52,9 @@ COPY --from=builder /out/tvtrim   /usr/local/bin/tvtrim
 
 # 直接指定 ffmpeg 路径,跳过运行时查找与自动下载。
 ENV TVTRIM_FFMPEG=/usr/local/bin/ffmpeg
+# 明确声明容器身份:-web 默认监听 0.0.0.0:8080(否则只监听回环,
+# 宿机通过端口映射访问不到),且不尝试调用浏览器。
+ENV TVTRIM_CONTAINER=1
 
 WORKDIR /media
 ENTRYPOINT ["/usr/local/bin/tvtrim"]
